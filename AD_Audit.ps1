@@ -1,6 +1,6 @@
 ﻿clear
 date
-Write-Host "Script version 1.0" -ForegroundColor Cyan
+Write-Host "Script version 1.1" -ForegroundColor Cyan
 Write-Host "https://github.com/evs-zdl/public" -ForegroundColor Cyan
 # you'll probably want FullLanguage mode rather than Constrained before running this as well as an AMSI bypass.
 # so you'll want a ConstrainedLanguage mode and AMSI bypass.
@@ -66,28 +66,33 @@ Get-DomainUser -AdminCount -Domain $domain | Where-Object {  $_.UserAccountCon
 write-host ""
 #>
 
-# Insufficient KRBTGT Password Rotation 
-Write-Host "Insufficient KRBTTGT Password Rotation" 
-# Define a function to check the last password change of the krbtgt account  
-function Get-KrbtgtLastChange {  
-    # Retrieve the krbtgt account details  
-    $krbtgtAccount = Get-DomainUser -Identity "krbtgt" -Properties pwdLastSet -Domain $domain
+Write-Host "Insufficient KRBTTGT Password Rotation"
+# Define a function to check the last password change of the krbtgt account
+function Get-KrbtgtLastChange {
+    # Retrieve the krbtgt account details
+    $krbtgtAccount = Get-DomainUser -Identity "krbtgt" -Properties pwdLastSet -Domain $domain
 
-    # Check if the pwdLastSet property exists  
-    if ($krbtgtAccount.pwdLastSet) {  
-        # Check if the password was changed more than 180 days ago  
-        if ($krbtgtAccount.pwdLastSet -lt (Get-Date).AddDays(-180)) {  
-            Write-Output "krbtgt password is out of date. Last changed on $($krbtgtAccount.pwdLastSet)." | Export-Csv -NoTypeInformation -Append krbtgt_pwd_last_set_greater_than_6_months_ago_$domain.csv
-        } else {  
-            Write-Output "krbtgt password is up to date. Last changed on $($krbtgtAccount.pwdLastSet)."  
-        }  
-    } else {  
-        Write-Output "[!] Could not retrieve pwdLastSet for krbtgt account."  
-    }  
+    # Check if the pwdLastSet property exists
+    if ($krbtgtAccount.pwdLastSet) {
+        # Check if the password was changed more than 180 days ago
+        if ($krbtgtAccount.pwdLastSet -lt (Get-Date).AddDays(-180)) {
+            Write-Output "krbtgt password is out of date. Last changed on $($krbtgtAccount.pwdLastSet)."
+
+$($krbtgtAccount.pwdlastset) | Export-Csv -NoTypeInformation -Append krbtgt_pwd_last_set_greater_than_6_months_ago_$domain.csv
+        } else {
+            Write-Output "krbtgt password is up to date. Last changed on $($krbtgtAccount.pwdLastSet)."
+        }  
+    } else {
+        Write-Output "[!] Could not retrieve pwdLastSet for krbtgt account."
+    }
 }
 
 Get-KrbtgtLastChange
-write-host ""
+
+# machine quota above 0
+$domainParts = $domain -split '\.'
+$distinguishedName = ($domainParts | ForEach-Object { "DC=$_" }) -join ','
+Get-DomainObject -DistinguishedName "$distinguishedName" -ErrorAction SilentlyContinue | Select-Object ms-ds-machineaccountquota | Export-Csv -NoTypeInformation -Append machine_quota_above_0_$domain.csv
 
 # Get Kerberoastable users
 Write-Host "Kerberoastable users:"
