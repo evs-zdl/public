@@ -120,3 +120,5 @@ function Invoke-WPADProxyAutoConfigurationCheck {
         $CheckResult
     }
 }
+
+Invoke-ProxyAutoConfigurationCheck | select -ExpandProperty Result
