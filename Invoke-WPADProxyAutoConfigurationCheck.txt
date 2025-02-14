@@ -121,4 +121,4 @@ function Invoke-WPADProxyAutoConfigurationCheck {
     }
 }
 
-Invoke-ProxyAutoConfigurationCheck | select -ExpandProperty Result
+Invoke-WPADProxyAutoConfigurationCheck | select -ExpandProperty Result
