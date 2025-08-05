@@ -1,0 +1,13 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do
+  echo -e "\n=================================================================="
+  echo -e "Looking at Storage Accounts in Subscription ID: $subId"
+  for storageAccount in $(az storage account list --subscription $subId --query '[*].name' | jq '.[]' | tr -d '"'); do
+    echo "Is data encrypted with a CMK in the storage account with name: $storageAccount"
+    cmkName=$(az storage account show --subscription $subId --name $storageAccount --query 'encryption.keyVaultProperties.keyName' | tr -d '"')
+    if [ -z "$cmkName" ]; then
+      echo "Nothing returned, so no CMK used here."
+    else
+      echo "Customer Managed Key Name: $cmkName"
+    fi
+  done
+done

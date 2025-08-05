@@ -1,0 +1,23 @@
+$subscriptionIds = @("")
+foreach($subscriptionID in $subscriptionIds){
+Write-Host “Subscription ID: $subscriptionId”
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Authorization/policyAssignments/write"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object{$_.ConditionAllOf.Equal -match "Microsoft.Authorization/policyAssignments/delete"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Network/networkSecurityGroups/write"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Network/networkSecurityGroups/delete"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Security/securitySolutions/write"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Security/securitySolutions/delete"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID)|where-object {$_.ConditionAllOf.Equal -match "Microsoft.Sql/servers/firewallRules/write"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Sql/servers/firewallRules/delete"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Network/publicIPAddresses/write"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+
+Get-AzActivityLogAlert -SubscriptionId $($subscriptionID) | where-object {$_.ConditionAllOf.Equal -match "Microsoft.Network/publicIPAddresses/delete"} | select-object Location,Name,Enabled,ResourceGroupName,ConditionAllOf
+}
