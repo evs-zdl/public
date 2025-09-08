@@ -1,0 +1,36 @@
+# Prompt for domain credentials
+$cred = Get-Credential  # Enter DOMAIN\User and password
+
+# Define domain/DC to target (can be FQDN of a DC)
+$server   = "dc1.domain.com"
+$baseDN   = (Get-ADRootDSE -Server $server -Credential $cred).configurationNamingContext
+$searchDN = "CN=Enrollment Services,CN=Public Key Services,CN=Services,CN=Configuration,$baseDN"
+
+# Bind with credentials
+$entry = New-Object DirectoryServices.DirectoryEntry("LDAP://$server/$searchDN",
+    $cred.UserName,
+    $cred.GetNetworkCredential().Password
+)
+
+# Create a searcher
+$searcher = New-Object DirectoryServices.DirectorySearcher($entry)
+$searcher.Filter = "(objectClass=pKIEnrollmentService)"
+$searcher.PropertiesToLoad.Add("dNSHostName")             | Out-Null
+$searcher.PropertiesToLoad.Add("msPKI-Enrollment-Servers")| Out-Null
+$searcher.PropertiesToLoad.Add("cn")                      | Out-Null
+
+# Run search
+$results = $searcher.FindAll()
+
+# Output nicely
+$results | ForEach-Object {
+    [PSCustomObject]@{
+        CAName            = $_.Properties["cn"]
+        DNSHost           = $_.Properties["dNSHostName"]
+        EnrollmentServers = if ($_.Properties["msPKI-Enrollment-Servers"]) {
+                                $_.Properties["msPKI-Enrollment-Servers"] -join "; "
+                            } else {
+                                "None published"
+                            }
+    }
+} | Format-Table -AutoSize
