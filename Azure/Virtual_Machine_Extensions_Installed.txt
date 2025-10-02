@@ -1,0 +1,10 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do
+  echo -e "\n=================================================================="
+  echo -e "Looking at VMs in Subscription ID: $subId"
+  for vm in $(az vm list --subscription $subId --query '[].{name:name, resourceGroup:resourceGroup}' -o json | jq -c '.[]'); do
+    vmName=$(echo "$vm" | jq -r '.name')
+    resourceGroup=$(echo "$vm" | jq -r '.resourceGroup')
+    echo "Getting extensions for VM with name: $vmName in resource group: $resourceGroup"
+    az vm extension list --subscription $subId --resource-group $resourceGroup --vm-name $vmName --query '[].name'
+  done
+done
