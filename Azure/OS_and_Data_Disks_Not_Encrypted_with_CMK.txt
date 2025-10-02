@@ -1,0 +1,8 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do
+  echo -e "\n=================================================================="
+  echo -e "Looking at disks in in Subscription ID: $subId"
+  for diskId in $(az disk list --subscription $subId --query '[*].id' | jq '. []' | tr -d '"'); do
+	echo "Is disk encrypted with CMK for disk ID: $diskId ?"
+	az disk show --ids $diskId --query 'encryption.type'	
+  done
+done
