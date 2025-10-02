@@ -1,0 +1,1 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do echo "Subscription ID: $subId" && az security pricing list --subscription $subId | jq '.value | map(select(.pricingTier == "Free") | {name, id, subPlan, pricingTier})'; done
