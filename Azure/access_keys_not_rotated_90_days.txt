@@ -1,0 +1,8 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do
+  echo -e "\nLooking at Resource Groups in Subscription ID: $subId"
+  for storageAccountList in $(az storage account list --subscription $subId --query '[*].{name:name,resourceGroup:resourceGroup}' | jq '.[] | .resourceGroup' | tr -d '"'); do
+    echo "Specifically looking for ‘regenerateKey‘ activity for Resource Group: $storageAccountList"
+    az monitor activity-log list --resource-group $storageAccountList --status Succeeded --offset 90d --query '[*].{id:id, authorization:authorization.action, eventTimestamp:eventTimestamp}' |
+    jq '.[] | select(.authorization == "Microsoft.Storage/storageAccounts/regenerateKey/action") | {"Storage Account Name": (.id | capture("storageAccounts/(?<storageName>[^/]+)/events") | .storageName), authorization, eventTimestamp}'
+  done
+done
