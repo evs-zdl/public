@@ -1,0 +1,8 @@
+for subId in $(az account subscription list | jq '.[] | .subscriptionId' | tr -d '"'); do
+  echo -e "\n=================================================================="
+  echo -e "Looking at Storage Account IDs in Subscription ID: $subId"
+  for storageAccount in $(az storage account list --subscription $subId --query '[*].id' | jq '. []' | tr -d '"'); do
+	echo -e "\nIs public access enabled to the blob associated with storage account with ID?: $storageAccount"
+	az storage account show --ids $storageAccount --query allowBlobPublicAccess
+  done
+done
