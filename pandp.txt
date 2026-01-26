@@ -1,3 +1,4 @@
+# j Hammond repo p and p
 function add_printer
 {
     param (
