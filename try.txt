@@ -1,33 +1,45 @@
 $ErrorActionPreference = "Stop"
 
-$UserUpn  = "user@domain.com"
-$RoleName = "AI Administrator"
+# ===== CONFIG =====
+$UserUpn   = "user@domain.com"
+$GroupName = "My Security Group"
+# ==================
 
-# Resolve user object id
+# Resolve user object ID
 $UserId = (az ad user show --id $UserUpn --query id -o tsv).Trim()
 if (-not $UserId) { throw "User not found: $UserUpn" }
 
-# Resolve active directory role id
-$RoleId = (az rest --method GET `
-  --url "https://graph.microsoft.com/v1.0/directoryRoles" `
-  --query "value[?displayName=='$RoleName'].id" -o tsv).Trim()
-if (-not $RoleId) { throw "Role not found in /directoryRoles: $RoleName (may be inactive in this tenant)" }
+# Resolve group object ID
+$GroupId = (az ad group list `
+    --filter "displayName eq '$GroupName'" `
+    --query "[0].id" -o tsv).Trim()
 
-# Build JSON body as a literal string (most robust in PowerShell)
-$Body = @"
-{"@odata.id":"https://graph.microsoft.com/v1.0/directoryObjects/$UserId"}
-"@.Trim()
+if (-not $GroupId) { throw "Group not found: $GroupName" }
 
-# Add user to role via $ref
+# Check if user already member
+$already = az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/groups/$GroupId/members?`$select=id" `
+  --query "value[?id=='$UserId'] | length(@)" `
+  -o tsv
+
+if ([int]$already -gt 0) {
+    Write-Host "User '$UserUpn' is already in group '$GroupName'"
+    exit 0
+}
+
+# Build JSON body
+$Body = '{"@odata.id":"https://graph.microsoft.com/v1.0/directoryObjects/' + $UserId + '"}'
+
+# Add user to group
 az rest --method POST `
-  --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members/`$ref" `
-  --headers "{'Content-Type':'application/json'}" `
+  --url "https://graph.microsoft.com/v1.0/groups/$GroupId/members/`$ref" `
+  --headers "Content-Type=application/json" `
   --body $Body | Out-Null
 
-Write-Host "Added $UserUpn to role '$RoleName'."
+Write-Host "Added '$UserUpn' to group '$GroupName'"
 
-# Verify (names)
+# Verify membership
 az rest --method GET `
-  --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members?`$select=displayName,userPrincipalName,id" `
+  --url "https://graph.microsoft.com/v1.0/groups/$GroupId/members?`$select=displayName,userPrincipalName,id" `
   --query "value[].{displayName:displayName, userPrincipalName:userPrincipalName, id:id}" `
   -o table
