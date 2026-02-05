@@ -1,10 +1,19 @@
-USER_ID=$(az ad user show --id user@domain.com --query id -o tsv)
+$USER_ID = az ad user show --id user@domain.com --query id -o tsv
 
-ROLE_ID=$(az rest --method GET \
-  --url https://graph.microsoft.com/v1.0/directoryRoles \
-  --query "value[?displayName=='AI Administrator'].id" \
-  -o tsv)
+$ROLE_ID = az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/directoryRoles" `
+  --query "value[?displayName=='AI Administrator'].id" `
+  -o tsv
 
-az rest --method POST \
-  --url https://graph.microsoft.com/v1.0/directoryRoles/$ROLE_ID/members/\$ref \
-  --body "{\"@odata.id\": \"https://graph.microsoft.com/v1.0/directoryObjects/$USER_ID\"}"
+$USER_ID = $USER_ID.Trim()
+$ROLE_ID = $ROLE_ID.Trim()
+
+$body = @{
+  "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$USER_ID"
+} | ConvertTo-Json
+
+az rest --method POST `
+  --url "https://graph.microsoft.com/v1.0/directoryRoles/$ROLE_ID/members/`$ref" `
+  --body $body
+
+
