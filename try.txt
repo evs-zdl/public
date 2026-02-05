@@ -1,45 +1,32 @@
-# Add a user to a Microsoft Entra ID (Azure AD) directory role using Microsoft Graph via Azure CLI (az rest)
-# Usage: set $UserUpn and $RoleName, then run.
-
 $ErrorActionPreference = "Stop"
 
 $UserUpn  = "user@domain.com"
 $RoleName = "AI Administrator"
 
-# 1) Resolve user object ID
+# Resolve user object id
 $UserId = (az ad user show --id $UserUpn --query id -o tsv).Trim()
-if (-not $UserId) { throw "User not found or no id returned for: $UserUpn" }
+if (-not $UserId) { throw "User not found: $UserUpn" }
 
-# 2) Resolve active directory role ID (directoryRoles only contains activated roles)
+# Resolve active directory role id
 $RoleId = (az rest --method GET `
   --url "https://graph.microsoft.com/v1.0/directoryRoles" `
-  --query "value[?displayName=='$RoleName'].id" `
-  -o tsv).Trim()
-if (-not $RoleId) {
-  throw "Role '$RoleName' not found in /directoryRoles (it may be inactive/not activated in this tenant)."
-}
+  --query "value[?displayName=='$RoleName'].id" -o tsv).Trim()
+if (-not $RoleId) { throw "Role not found in /directoryRoles: $RoleName (may be inactive in this tenant)" }
 
-# 3) Skip if already a member
-$already = az rest --method GET `
-  --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members?`$select=id" `
-  --query "value[?id=='$UserId'] | length(@)" `
-  -o tsv
-if ([int]$already -gt 0) {
-  Write-Host "User '$UserUpn' is already a member of role '$RoleName'. Nothing to do."
-  exit 0
-}
+# Build JSON body as a literal string (most robust in PowerShell)
+$Body = @"
+{"@odata.id":"https://graph.microsoft.com/v1.0/directoryObjects/$UserId"}
+"@.Trim()
 
-# 4) Add membership via $ref
-$body = @{ "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$UserId" } | ConvertTo-Json -Compress
-
+# Add user to role via $ref
 az rest --method POST `
   --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members/`$ref" `
-  --headers "Content-Type=application/json" `
-  --body $body | Out-Null
+  --headers "{'Content-Type':'application/json'}" `
+  --body $Body | Out-Null
 
-Write-Host "Added '$UserUpn' to role '$RoleName'."
+Write-Host "Added $UserUpn to role '$RoleName'."
 
-# 5) Verify (prints display names)
+# Verify (names)
 az rest --method GET `
   --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members?`$select=displayName,userPrincipalName,id" `
   --query "value[].{displayName:displayName, userPrincipalName:userPrincipalName, id:id}" `
