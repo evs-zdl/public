@@ -56,8 +56,91 @@ $ErrorActionPreference = "Stop"
 $UserUpn = "user@domain.com"
 
 # Option 1 (simplest): use UPN directly in the Graph URL
-$url = "https://graph.microsoft.com/v1.0/users/$UserUpn?`$select=displayName,userPrincipalName,signInActivity"
+$url = "https://graph.microsoft.com/v1.0/users/$($UserUpn)?`$select=displayName,userPrincipalName,signInActivity"
 
 az rest --method GET --url $url `
   --query "{User:userPrincipalName, LastInteractive:signInActivity.lastSignInDateTime, LastNonInteractive:signInActivity.lastNonInteractiveSignInDateTime, LastSuccessful:signInActivity.lastSuccessfulSignInDateTime}" `
   -o table
+
+#key vaults
+
+$ErrorActionPreference = "Continue"
+
+$results = @()
+
+# Get all subscriptions
+$subs = az account list --query "[].{id:id,name:name}" -o json | ConvertFrom-Json
+
+foreach ($sub in $subs) {
+
+    Write-Host "`n===== Subscription: $($sub.name) ====="
+
+    az account set --subscription $sub.id | Out-Null
+
+    # Get vaults in subscription
+    $vaults = az keyvault list `
+        --query "[].{name:name, rg:resourceGroup, location:location, id:id}" `
+        -o json | ConvertFrom-Json
+
+    foreach ($vault in $vaults) {
+
+        Write-Host "Vault: $($vault.name)"
+
+        # Get vault properties (RBAC vs Access Policy)
+        $vaultProps = az keyvault show `
+            --name $vault.name `
+            --query "{rbac:properties.enableRbacAuthorization, tenantId:properties.tenantId}" `
+            -o json 2>$null | ConvertFrom-Json
+
+        # List secrets (metadata only)
+        $secrets = az keyvault secret list `
+            --vault-name $vault.name `
+            --query "[].{name:name, enabled:attributes.enabled, created:attributes.created, updated:attributes.updated, expires:attributes.expires}" `
+            -o json 2>$null
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Unable to list secrets (no permission?)"
+            continue
+        }
+
+        $secrets = $secrets | ConvertFrom-Json
+
+        if (-not $secrets) {
+            Write-Host "  No secrets found."
+            continue
+        }
+
+        foreach ($secret in $secrets) {
+
+            # Simple heuristic risk tagging
+            $riskTag = $null
+            $lower = $secret.name.ToLower()
+
+            if ($lower -match "secret|client|app|sp|cert|pfx|token|password|pwd") {
+                $riskTag = "PotentialCredential"
+            }
+
+            $results += [PSCustomObject]@{
+                SubscriptionName = $sub.name
+                SubscriptionId   = $sub.id
+                VaultName        = $vault.name
+                ResourceGroup    = $vault.rg
+                Location         = $vault.location
+                RBACEnabled      = $vaultProps.rbac
+                SecretName       = $secret.name
+                Enabled          = $secret.enabled
+                Created          = $secret.created
+                Updated          = $secret.updated
+                Expires          = $secret.expires
+                RiskFlag         = $riskTag
+            }
+        }
+    }
+}
+
+# Export results
+$outputFile = "KeyVault_Full_Audit_$(Get-Date -Format yyyyMMdd_HHmmss).csv"
+$results | Export-Csv $outputFile -NoTypeInformation -Encoding UTF8
+
+Write-Host "`nAudit complete."
+Write-Host "Results saved to: $outputFile"
