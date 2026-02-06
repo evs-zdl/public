@@ -48,3 +48,22 @@ az rest --method GET `
 # group type
 $GroupId = (az ad group list --filter "displayName eq 'SEC-PIM-Global Administrator Role'" --query "[0].id" -o tsv).Trim()
 az rest --method GET --url "https://graph.microsoft.com/v1.0/groups/$GroupId?`$select=id,displayName,isAssignableToRole" -o json
+
+
+
+# login activity
+$UserUpn = "user@domain.com"
+
+# Get user object ID
+$UserId = (az ad user show --id $UserUpn --query id -o tsv).Trim()
+
+# Query last sign-in info
+az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/users/$UserId?`$select=displayName,userPrincipalName,signInActivity" `
+  --query "{
+    User:userPrincipalName,
+    LastInteractive:signInActivity.lastSignInDateTime,
+    LastNonInteractive:signInActivity.lastNonInteractiveSignInDateTime,
+    LastSuccessful:signInActivity.lastSuccessfulSignInDateTime
+  }" `
+  -o table
