@@ -51,19 +51,13 @@ az rest --method GET --url "https://graph.microsoft.com/v1.0/groups/$GroupId?`$s
 
 
 
-# login activity
+$ErrorActionPreference = "Stop"
+
 $UserUpn = "user@domain.com"
 
-# Get user object ID
-$UserId = (az ad user show --id $UserUpn --query id -o tsv).Trim()
+# Option 1 (simplest): use UPN directly in the Graph URL
+$url = "https://graph.microsoft.com/v1.0/users/$UserUpn?`$select=displayName,userPrincipalName,signInActivity"
 
-# Query last sign-in info
-az rest --method GET `
-  --url "https://graph.microsoft.com/v1.0/users/$UserId?`$select=displayName,userPrincipalName,signInActivity" `
-  --query "{
-    User:userPrincipalName,
-    LastInteractive:signInActivity.lastSignInDateTime,
-    LastNonInteractive:signInActivity.lastNonInteractiveSignInDateTime,
-    LastSuccessful:signInActivity.lastSuccessfulSignInDateTime
-  }" `
+az rest --method GET --url $url `
+  --query "{User:userPrincipalName, LastInteractive:signInActivity.lastSignInDateTime, LastNonInteractive:signInActivity.lastNonInteractiveSignInDateTime, LastSuccessful:signInActivity.lastSuccessfulSignInDateTime}" `
   -o table
