@@ -251,3 +251,51 @@ foreach ($g in $sourceGroups) {
 
 Write-Host ""
 Write-Host "Done. Added=$added  Skipped=$skipped  Failed=$failed"
+
+
+
+==== assign user to entra role
+
+$ErrorActionPreference = "Stop"
+
+# ===== CONFIG =====
+$UserUpn  = "user@domain.com"
+$RoleName = "AI Administrator"
+# ==================
+
+# Resolve user ID
+$UserId = (az ad user show --id $UserUpn --query id -o tsv).Trim()
+if (-not $UserId) { throw "User not found: $UserUpn" }
+
+# Get active directory role ID
+$RoleId = (az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/directoryRoles?`$select=id,displayName" `
+  --query "value[?displayName=='$RoleName'].id | [0]" `
+  -o tsv).Trim()
+
+if (-not $RoleId) {
+  throw "Role '$RoleName' not found in /directoryRoles. It may not be activated in this tenant."
+}
+
+# Check if already assigned
+$already = az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members?`$select=id" `
+  --query "value[?id=='$UserId'] | length(@)" `
+  -o tsv
+
+if ([int]$already -gt 0) {
+  Write-Host "User already assigned to role '$RoleName'"
+  exit 0
+}
+
+# Build JSON body
+$Body = '{"@odata.id":"https://graph.microsoft.com/v1.0/directoryObjects/' + $UserId + '"}'
+
+# Add user to role
+az rest --method POST `
+  --url "https://graph.microsoft.com/v1.0/directoryRoles/$RoleId/members/`$ref" `
+  --headers "Content-Type=application/json" `
+  --body $Body | Out-Null
+
+Write-Host "Added '$UserUpn' to role '$RoleName'"
+
