@@ -144,3 +144,110 @@ $results | Export-Csv $outputFile -NoTypeInformation -Encoding UTF8
 
 Write-Host "`nAudit complete."
 Write-Host "Results saved to: $outputFile"
+
+
+
+===== copy group membership
+
+$ErrorActionPreference = "Stop"
+
+# ===== CONFIG =====
+$SourceUserUpn = "source@domain.com"   # copy FROM
+$TargetUserUpn = "target@domain.com"   # copy TO
+# ==================
+
+function Get-UserId([string]$upn) {
+  $id = (az ad user show --id $upn --query id -o tsv).Trim()
+  if (-not $id) { throw "Could not resolve user id for: $upn" }
+  return $id
+}
+
+function Get-AllPages([string]$url) {
+  $items = @()
+  while ($url) {
+    $page = az rest --method GET --url $url -o json | ConvertFrom-Json
+    if ($page.value) { $items += $page.value }
+    $url = $page.'@odata.nextLink'
+  }
+  return $items
+}
+
+$SourceUserId = Get-UserId $SourceUserUpn
+$TargetUserId = Get-UserId $TargetUserUpn
+
+Write-Host "Source: $SourceUserUpn ($SourceUserId)"
+Write-Host "Target: $TargetUserUpn ($TargetUserId)"
+Write-Host ""
+
+# 1) Get direct group memberships for source user (only Groups)
+# memberOf can include directory roles too; filter to group objects
+$memberOfUrl = "https://graph.microsoft.com/v1.0/users/$SourceUserId/memberOf/microsoft.graph.group?`$select=id,displayName,groupTypes,isAssignableToRole,membershipRule"
+$sourceGroups = Get-AllPages $memberOfUrl
+
+if (-not $sourceGroups -or $sourceGroups.Count -eq 0) {
+  Write-Host "No groups found for source user."
+  exit 0
+}
+
+Write-Host "Source is in $($sourceGroups.Count) groups (direct memberships)."
+
+# 2) For each group, decide if it's safe to add target user and then add
+$added = 0
+$skipped = 0
+$failed = 0
+
+foreach ($g in $sourceGroups) {
+  $groupId = $g.id
+  $groupName = $g.displayName
+
+  # Skip role-assignable groups (often needs RoleManagement permissions)
+  if ($g.isAssignableToRole -eq $true) {
+    Write-Host "SKIP (role-assignable): $groupName"
+    $skipped++
+    continue
+  }
+
+  # Skip dynamic membership groups (you can't manually add members)
+  # groupTypes may contain "DynamicMembership"; membershipRule may be present
+  $isDynamic = $false
+  if ($g.groupTypes -and ($g.groupTypes -contains "DynamicMembership")) { $isDynamic = $true }
+  if ($g.membershipRule) { $isDynamic = $true }
+
+  if ($isDynamic) {
+    Write-Host "SKIP (dynamic group): $groupName"
+    $skipped++
+    continue
+  }
+
+  # Check if target user already a member
+  $already = az rest --method GET `
+    --url "https://graph.microsoft.com/v1.0/groups/$groupId/members?`$select=id" `
+    --query "value[?id=='$TargetUserId'] | length(@)" `
+    -o tsv
+
+  if ([int]$already -gt 0) {
+    Write-Host "OK (already member): $groupName"
+    $skipped++
+    continue
+  }
+
+  # Add target user
+  $Body = '{"@odata.id":"https://graph.microsoft.com/v1.0/directoryObjects/' + $TargetUserId + '"}'
+
+  try {
+    az rest --method POST `
+      --url "https://graph.microsoft.com/v1.0/groups/$groupId/members/`$ref" `
+      --headers "Content-Type=application/json" `
+      --body $Body | Out-Null
+
+    Write-Host "ADDED: $groupName"
+    $added++
+  }
+  catch {
+    Write-Host "FAILED: $groupName"
+    $failed++
+  }
+}
+
+Write-Host ""
+Write-Host "Done. Added=$added  Skipped=$skipped  Failed=$failed"
