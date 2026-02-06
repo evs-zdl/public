@@ -43,3 +43,8 @@ az rest --method GET `
   --url "https://graph.microsoft.com/v1.0/groups/$GroupId/members?`$select=displayName,userPrincipalName,id" `
   --query "value[].{displayName:displayName, userPrincipalName:userPrincipalName, id:id}" `
   -o table
+
+
+# group type
+$GroupId = (az ad group list --filter "displayName eq 'SEC-PIM-Global Administrator Role'" --query "[0].id" -o tsv).Trim()
+az rest --method GET --url "https://graph.microsoft.com/v1.0/groups/$GroupId?`$select=id,displayName,isAssignableToRole" -o json
